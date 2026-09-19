@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="freshcrumbs.CRM.api/freshcrumbs.CRM.api.csproj" />
+  <Project Path="freshcrumbs.CRM.domain/freshcrumbs.CRM.domain.csproj" />
+  <Project Path="freshcrumbs.CRM.infrastructure/freshcrumbs.CRM.infrastructure.csproj" />
+  <Project Path="freshcrumbs.CRM/freshcrumbs.CRM.winforms.csproj" />
+</Solution>

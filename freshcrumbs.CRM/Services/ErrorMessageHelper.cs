@@ -1,0 +1,37 @@
+﻿using System.Net.Http;
+
+namespace freshcrumbs.CRM.winforms.Services
+{
+    public static class ErrorMessageHelper
+    {
+        public static string GetFriendlyMessage(Exception ex)
+        {
+            if (ex is HttpRequestException httpEx)
+            {
+                if (httpEx.StatusCode == System.Net.HttpStatusCode.NotFound)
+                {
+                    return "The requested record could not be found. It may have been removed.";
+                }
+
+                if (httpEx.StatusCode == System.Net.HttpStatusCode.BadRequest)
+                {
+                    return "The information provided is invalid. Please check the fields and try again.";
+                }
+
+                if (httpEx.StatusCode == System.Net.HttpStatusCode.Conflict)
+                {
+                    return "This action could not be completed because it conflicts with existing data.";
+                }
+
+                if (httpEx.StatusCode == System.Net.HttpStatusCode.InternalServerError)
+                {
+                    return "The server encountered a problem processing this request. Please try again.";
+                }
+
+                return "Could not connect to the server. Please check your connection and try again.";
+            }
+
+            return "An unexpected error occurred. Please try again.";
+        }
+    }
+}
