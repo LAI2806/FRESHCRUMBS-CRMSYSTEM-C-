@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 
 namespace freshcrumbs.CRM.domain.entities
 {
@@ -23,5 +24,7 @@ namespace freshcrumbs.CRM.domain.entities
         public string Status { get; set; } = "Active";
 
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+        public ICollection<CustomerDiscountEligibility> DiscountEligibilities { get; set; } = new List<CustomerDiscountEligibility>();
     }
 }

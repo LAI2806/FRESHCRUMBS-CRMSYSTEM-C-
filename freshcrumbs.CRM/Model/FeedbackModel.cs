@@ -8,9 +8,9 @@
 
         public string Type { get; set; } = string.Empty;
 
-        public string Subject { get; set; } = string.Empty;
+        public string Category { get; set; } = string.Empty;
 
-        public string Description { get; set; } = string.Empty;
+        public string Comment { get; set; } = string.Empty;
 
         public DateTime DateSubmitted { get; set; } = DateTime.Now;
 

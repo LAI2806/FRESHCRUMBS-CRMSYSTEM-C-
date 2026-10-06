@@ -1,4 +1,5 @@
 ﻿using freshcrumbs.CRM.winforms.Models;
+using freshcrumbs.CRM.winforms.Services;
 
 namespace freshcrumbs.CRM.winforms.Forms
 {
@@ -6,14 +7,27 @@ namespace freshcrumbs.CRM.winforms.Forms
     {
         private class BreakdownRow
         {
+            public int LoyaltyTransactionId { get; set; }
             public string Date { get; set; } = string.Empty;
             public int PointsEarned { get; set; }
             public int PointsUsed { get; set; }
             public string TransactionType { get; set; } = string.Empty;
         }
 
-        public LoyaltyBreakdownDialog(string customerName, List<LoyaltyModel> transactions)
+        private readonly ApiService _apiService;
+        private readonly int _companyId;
+        private readonly List<LoyaltyModel> _transactions;
+
+        private DataGridView _grid = null!;
+        private Button _deleteButton = null!;
+        private Label _statusLabel = null!;
+
+        public LoyaltyBreakdownDialog(string customerName, List<LoyaltyModel> transactions, int companyId)
         {
+            _apiService = new ApiService();
+            _companyId = companyId;
+            _transactions = transactions;
+
             Text = $"{customerName} - Loyalty Breakdown";
             Width = 560;
             Height = 480;
@@ -32,7 +46,49 @@ namespace freshcrumbs.CRM.winforms.Forms
             };
             Controls.Add(header);
 
-            var grid = new DataGridView
+            var footerPanel = new Panel
+            {
+                Dock = DockStyle.Bottom,
+                Height = 56
+            };
+
+            _statusLabel = new Label
+            {
+                Text = "",
+                AutoSize = false,
+                Location = new Point(20, 18),
+                Width = 320,
+                Height = 24,
+                Font = new Font("Segoe UI", 9, FontStyle.Italic),
+                ForeColor = Color.Firebrick
+            };
+            footerPanel.Controls.Add(_statusLabel);
+
+            _deleteButton = new Button
+            {
+                Text = "Delete Transaction",
+                Width = 160,
+                Height = 38,
+                Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+                BackColor = Color.FromArgb(180, 60, 50),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Cursor = Cursors.Hand,
+                Enabled = false
+            };
+            _deleteButton.FlatAppearance.BorderSize = 0;
+            _deleteButton.Click += DeleteButton_Click;
+            footerPanel.Controls.Add(_deleteButton);
+
+            footerPanel.Resize += (s, e) =>
+            {
+                _deleteButton.Location = new Point(footerPanel.Width - _deleteButton.Width - 20, 9);
+            };
+            _deleteButton.Location = new Point(footerPanel.Width - _deleteButton.Width - 20, 9);
+
+            Controls.Add(footerPanel);
+
+            _grid = new DataGridView
             {
                 Dock = DockStyle.Fill,
                 BackgroundColor = Color.White,
@@ -41,6 +97,7 @@ namespace freshcrumbs.CRM.winforms.Forms
                 AllowUserToAddRows = false,
                 AllowUserToDeleteRows = false,
                 SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+                MultiSelect = false,
                 AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
                 RowHeadersVisible = false,
                 Font = new Font("Segoe UI", 9.5f),
@@ -48,39 +105,58 @@ namespace freshcrumbs.CRM.winforms.Forms
                 EnableHeadersVisualStyles = false,
                 AutoGenerateColumns = false
             };
-            grid.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(250, 246, 242);
-            grid.ColumnHeadersDefaultCellStyle.Font = new Font("Segoe UI", 9.5f, FontStyle.Bold);
-            grid.ColumnHeadersHeight = 40;
+            _grid.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(250, 246, 242);
+            _grid.ColumnHeadersDefaultCellStyle.Font = new Font("Segoe UI", 9.5f, FontStyle.Bold);
+            _grid.ColumnHeadersHeight = 40;
 
-            grid.Columns.Add(new DataGridViewTextBoxColumn
+            _grid.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                DataPropertyName = "LoyaltyTransactionId",
+                Visible = false
+            });
+            _grid.Columns.Add(new DataGridViewTextBoxColumn
             {
                 DataPropertyName = "Date",
                 HeaderText = "Date",
                 Name = "Date"
             });
-            grid.Columns.Add(new DataGridViewTextBoxColumn
+            _grid.Columns.Add(new DataGridViewTextBoxColumn
             {
                 DataPropertyName = "PointsEarned",
                 HeaderText = "Points Earned",
                 Name = "PointsEarned"
             });
-            grid.Columns.Add(new DataGridViewTextBoxColumn
+            _grid.Columns.Add(new DataGridViewTextBoxColumn
             {
                 DataPropertyName = "PointsUsed",
                 HeaderText = "Points Used",
                 Name = "PointsUsed"
             });
-            grid.Columns.Add(new DataGridViewTextBoxColumn
+            _grid.Columns.Add(new DataGridViewTextBoxColumn
             {
                 DataPropertyName = "TransactionType",
                 HeaderText = "Type",
                 Name = "TransactionType"
             });
 
-            var rows = transactions
+            _grid.SelectionChanged += (s, e) =>
+            {
+                _deleteButton.Enabled = _grid.SelectedRows.Count > 0;
+            };
+
+            BindGrid();
+
+            Controls.Add(_grid);
+            _grid.BringToFront();
+        }
+
+        private void BindGrid()
+        {
+            var rows = _transactions
                 .OrderByDescending(t => t.Date)
                 .Select(t => new BreakdownRow
                 {
+                    LoyaltyTransactionId = t.LoyaltyTransactionId,
                     Date = t.Date.ToString("MM/dd/yyyy"),
                     PointsEarned = t.PointsEarned,
                     PointsUsed = t.PointsUsed,
@@ -88,10 +164,43 @@ namespace freshcrumbs.CRM.winforms.Forms
                 })
                 .ToList();
 
-            grid.DataSource = rows;
+            _grid.DataSource = rows;
+        }
 
-            Controls.Add(grid);
-            grid.BringToFront();
+        private async void DeleteButton_Click(object? sender, EventArgs e)
+        {
+            if (_grid.SelectedRows.Count == 0 ||
+                _grid.SelectedRows[0].DataBoundItem is not BreakdownRow selectedRow)
+            {
+                return;
+            }
+
+            var confirm = MessageBox.Show(
+                "Delete this loyalty transaction? This will reverse its points.",
+                "Confirm Delete",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+
+            if (confirm != DialogResult.Yes)
+            {
+                return;
+            }
+
+            try
+            {
+                _statusLabel.Text = "";
+                _deleteButton.Enabled = false;
+
+                await _apiService.DeleteLoyaltyTransactionAsync(_companyId, selectedRow.LoyaltyTransactionId);
+
+                _transactions.RemoveAll(t => t.LoyaltyTransactionId == selectedRow.LoyaltyTransactionId);
+                BindGrid();
+            }
+            catch (Exception ex)
+            {
+                _statusLabel.Text = $"Failed to delete: {ErrorMessageHelper.GetFriendlyMessage(ex)}";
+                _deleteButton.Enabled = true;
+            }
         }
     }
 }

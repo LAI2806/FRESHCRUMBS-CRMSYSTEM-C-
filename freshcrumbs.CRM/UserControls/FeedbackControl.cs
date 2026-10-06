@@ -16,15 +16,35 @@ namespace freshcrumbs.CRM.winforms.UserControls
         private static readonly Color PageBg = Color.FromArgb(244, 244, 246);
         private static readonly Color HeaderRowColor = Color.FromArgb(250, 246, 242);
 
+        private const int PageSize = 50;
+
         private DataGridView _feedbackGrid = null!;
         private TextBox _searchBox = null!;
         private Button _addButton = null!;
         private Button _editButton = null!;
         private Button _deleteButton = null!;
         private Label _statusLabel = null!;
+        private Panel _pagerPanel = null!;
+        private Label _pageInfoLabel = null!;
+        private Button _prevPageButton = null!;
+        private Button _nextPageButton = null!;
 
         private List<FeedbackModel> _feedbackList = new();
         private List<CustomerModel> _customers = new();
+        private List<FeedbackDisplayRow> _filteredRows = new();
+        private int _currentPage = 1;
+
+        private class FeedbackDisplayRow
+        {
+            public int FeedbackId { get; set; }
+            public string CustomerCode { get; set; } = string.Empty;
+            public string CustomerName { get; set; } = string.Empty;
+            public string Type { get; set; } = string.Empty;
+            public string Category { get; set; } = string.Empty;
+            public string Comment { get; set; } = string.Empty;
+            public DateTime DateSubmitted { get; set; }
+            public string Status { get; set; } = string.Empty;
+        }
 
         public FeedbackControl(int companyId)
         {
@@ -71,7 +91,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
                 Height = 34,
                 Font = new Font("Segoe UI", 10),
                 BorderStyle = BorderStyle.FixedSingle,
-                PlaceholderText = "Search by customer, subject, or type..."
+                PlaceholderText = "Search code, customer, category, or type..."
             };
             _searchBox.TextChanged += SearchBox_TextChanged;
             toolbarPanel.Controls.Add(_searchBox);
@@ -88,6 +108,16 @@ namespace freshcrumbs.CRM.winforms.UserControls
             _editButton.Enabled = false;
             _editButton.Click += EditButton_Click;
             toolbarPanel.Controls.Add(_editButton);
+
+            _deleteButton = CreateActionButton("Delete", Color.White, Color.Firebrick, 100);
+            _deleteButton.FlatAppearance.BorderSize = 1;
+            _deleteButton.FlatAppearance.BorderColor = Color.Firebrick;
+            _deleteButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            _deleteButton.Enabled = false;
+            _deleteButton.Click += DeleteButton_Click;
+            toolbarPanel.Controls.Add(_deleteButton);
+
+            toolbarPanel.Resize += (s, e) => PositionToolbarButtons(toolbarPanel);
 
             toolbarPanel.Resize += (s, e) => PositionToolbarButtons(toolbarPanel);
             PositionToolbarButtons(toolbarPanel);
@@ -135,6 +165,9 @@ namespace freshcrumbs.CRM.winforms.UserControls
             gridContainer.Controls.Add(_feedbackGrid);
             rootLayout.Controls.Add(gridContainer, 0, 2);
 
+            _pagerPanel = CreatePagerPanel();
+            gridContainer.Controls.Add(_pagerPanel);
+
             _statusLabel = new Label
             {
                 Text = "",
@@ -154,6 +187,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
         {
             _addButton.Location = new Point(toolbarPanel.Width - _addButton.Width, 8);
             _editButton.Location = new Point(_addButton.Left - _editButton.Width - 10, 8);
+            _deleteButton.Location = new Point(_editButton.Left - _deleteButton.Width - 10, 8);
         }
 
         private Button CreateActionButton(string text, Color backColor, Color foreColor, int width)
@@ -173,6 +207,125 @@ namespace freshcrumbs.CRM.winforms.UserControls
             return button;
         }
 
+        private Panel CreatePagerPanel()
+        {
+            var panel = new Panel
+            {
+                Dock = DockStyle.Bottom,
+                Height = 40
+            };
+
+            _pageInfoLabel = new Label
+            {
+                AutoSize = true,
+                Font = new Font("Segoe UI", 9.5f),
+                ForeColor = LabelGray,
+                Location = new Point(0, 11),
+                Text = "Page 1 of 1"
+            };
+            panel.Controls.Add(_pageInfoLabel);
+
+            _nextPageButton = new Button
+            {
+                Text = "Next \u203A",
+                Width = 90,
+                Height = 30,
+                Font = new Font("Segoe UI", 9.5f),
+                BackColor = Color.White,
+                ForeColor = LabelGray,
+                FlatStyle = FlatStyle.Flat,
+                Cursor = Cursors.Hand,
+                Enabled = false
+            };
+            _nextPageButton.FlatAppearance.BorderSize = 1;
+            _nextPageButton.FlatAppearance.BorderColor = BorderColor;
+            _nextPageButton.Click += (s, e) => ChangePage(1);
+            panel.Controls.Add(_nextPageButton);
+
+            _prevPageButton = new Button
+            {
+                Text = "\u2039 Previous",
+                Width = 90,
+                Height = 30,
+                Font = new Font("Segoe UI", 9.5f),
+                BackColor = Color.White,
+                ForeColor = LabelGray,
+                FlatStyle = FlatStyle.Flat,
+                Cursor = Cursors.Hand,
+                Enabled = false
+            };
+            _prevPageButton.FlatAppearance.BorderSize = 1;
+            _prevPageButton.FlatAppearance.BorderColor = BorderColor;
+            _prevPageButton.Click += (s, e) => ChangePage(-1);
+            panel.Controls.Add(_prevPageButton);
+
+            panel.Resize += (s, e) => PositionPagerButtons(panel);
+            PositionPagerButtons(panel);
+
+            return panel;
+        }
+
+        private void PositionPagerButtons(Panel pagerPanel)
+        {
+            _nextPageButton.Location = new Point(pagerPanel.Width - _nextPageButton.Width, 5);
+            _prevPageButton.Location = new Point(_nextPageButton.Left - _prevPageButton.Width - 10, 5);
+        }
+
+        private void ChangePage(int delta)
+        {
+            _currentPage += delta;
+            RenderCurrentPage();
+        }
+
+        private void RenderCurrentPage()
+        {
+            int totalRecords = _filteredRows.Count;
+            int totalPages = totalRecords == 0 ? 1 : (int)Math.Ceiling(totalRecords / (double)PageSize);
+
+            if (_currentPage > totalPages)
+            {
+                _currentPage = totalPages;
+            }
+            if (_currentPage < 1)
+            {
+                _currentPage = 1;
+            }
+
+            var pageItems = _filteredRows
+                .Skip((_currentPage - 1) * PageSize)
+                .Take(PageSize)
+                .ToList();
+
+            _feedbackGrid.AutoGenerateColumns = true;
+            _feedbackGrid.DataSource = null;
+            _feedbackGrid.DataSource = pageItems;
+
+            if (_feedbackGrid.Columns["FeedbackId"] != null)
+            {
+                _feedbackGrid.Columns["FeedbackId"].Visible = false;
+            }
+
+            SetColumnHeader("CustomerCode", "Customer Code");
+            SetColumnHeader("CustomerName", "Customer Name");
+            SetColumnHeader("Type", "Type");
+            SetColumnHeader("Category", "Category");
+            SetColumnHeader("Comment", "Comment");
+            SetColumnHeader("DateSubmitted", "Date Submitted");
+            SetColumnHeader("Status", "Status");
+
+            if (_feedbackGrid.Columns["DateSubmitted"] != null)
+            {
+                _feedbackGrid.Columns["DateSubmitted"].DefaultCellStyle.Format = "MM/dd/yyyy";
+            }
+
+            _pageInfoLabel.Text = totalRecords == 0
+                ? "No records"
+                : $"Page {_currentPage} of {totalPages} ({totalRecords} {(totalRecords == 1 ? "record" : "records")})";
+
+            _prevPageButton.Enabled = _currentPage > 1;
+            _nextPageButton.Enabled = _currentPage < totalPages;
+        }
+
         private async void FeedbackControl_Load(object? sender, EventArgs e)
         {
             await LoadDataAsync();
@@ -183,7 +336,8 @@ namespace freshcrumbs.CRM.winforms.UserControls
             try
             {
                 _statusLabel.Text = "";
-                _customers = await _apiService.GetCustomersAsync(_companyId);
+                // Include inactive customers so older records still show their Customer Code and name.
+                _customers = await _apiService.GetCustomersAsync(_companyId, includeInactive: true);
                 _feedbackList = await _apiService.GetFeedbackAsync(_companyId);
                 BindGrid();
             }
@@ -193,48 +347,42 @@ namespace freshcrumbs.CRM.winforms.UserControls
             }
         }
 
-        private void BindGrid()
+        private void BindGrid(bool resetPage = true)
         {
             string term = _searchBox?.Text.Trim().ToLowerInvariant() ?? "";
 
-            var displayRows = _feedbackList
-                .Select(f => new
+            _filteredRows = _feedbackList
+                .Select(f => new FeedbackDisplayRow
                 {
-                    f.FeedbackId,
+                    FeedbackId = f.FeedbackId,
+                    CustomerCode = GetCustomerCode(f.CustomerId),
                     CustomerName = GetCustomerName(f.CustomerId),
-                    f.Type,
-                    f.Subject,
-                    f.Description,
-                    f.DateSubmitted,
-                    f.Status
+                    Type = f.Type,
+                    Category = f.Category,
+                    Comment = f.Comment,
+                    DateSubmitted = f.DateSubmitted,
+                    Status = f.Status
                 })
                 .Where(row =>
                     string.IsNullOrEmpty(term) ||
+                    row.CustomerCode.ToLowerInvariant().Contains(term) ||
                     row.CustomerName.ToLowerInvariant().Contains(term) ||
-                    row.Subject.ToLowerInvariant().Contains(term) ||
+                    row.Category.ToLowerInvariant().Contains(term) ||
                     row.Type.ToLowerInvariant().Contains(term))
                 .ToList();
 
-            _feedbackGrid.AutoGenerateColumns = true;
-            _feedbackGrid.DataSource = null;
-            _feedbackGrid.DataSource = displayRows;
-
-            if (_feedbackGrid.Columns["FeedbackId"] != null)
+            if (resetPage)
             {
-                _feedbackGrid.Columns["FeedbackId"].Visible = false;
+                _currentPage = 1;
             }
 
-            SetColumnHeader("CustomerName", "Customer");
-            SetColumnHeader("Type", "Type");
-            SetColumnHeader("Subject", "Subject");
-            SetColumnHeader("Description", "Description");
-            SetColumnHeader("DateSubmitted", "Date Submitted");
-            SetColumnHeader("Status", "Status");
+            RenderCurrentPage();
+        }
 
-            if (_feedbackGrid.Columns["DateSubmitted"] != null)
-            {
-                _feedbackGrid.Columns["DateSubmitted"].DefaultCellStyle.Format = "MM/dd/yyyy";
-            }
+        private string GetCustomerCode(int customerId)
+        {
+            var customer = _customers.FirstOrDefault(c => c.CustomerId == customerId);
+            return customer != null ? customer.CustomerCode : string.Empty;
         }
 
         private string GetCustomerName(int customerId)
@@ -258,7 +406,9 @@ namespace freshcrumbs.CRM.winforms.UserControls
 
         private void FeedbackGrid_SelectionChanged(object? sender, EventArgs e)
         {
-            _editButton.Enabled = _feedbackGrid.SelectedRows.Count > 0;
+            bool hasSelection = _feedbackGrid.SelectedRows.Count > 0;
+            _editButton.Enabled = hasSelection;
+            _deleteButton.Enabled = hasSelection;
         }
 
         private FeedbackModel? GetSelectedFeedback()
@@ -329,7 +479,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
             }
 
             var confirm = MessageBox.Show(
-                $"Are you sure you want to delete this feedback: \"{selectedFeedback.Subject}\"?",
+                $"Are you sure you want to delete this feedback: \"{selectedFeedback.Category}\"?",
                 "Confirm Delete",
                 MessageBoxButtons.YesNo,
                 MessageBoxIcon.Warning);

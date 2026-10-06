@@ -19,6 +19,15 @@ namespace freshcrumbs.CRM.domain.entities
 
         public int Quantity { get; set; }
 
+        public int ReorderLevel { get; set; } = 10;
+
+        public int Sold { get; set; }
+
+        public string StockLevel =>
+            Quantity <= 0 ? "Out of Stock" :
+            Quantity <= ReorderLevel ? "Low Stock" :
+            "In Stock";
+
         public string Status { get; set; } = "Active";
 
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;

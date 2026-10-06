@@ -14,6 +14,8 @@
 
         public decimal DiscountAmount { get; set; }
 
+        public decimal CustomerDiscountAmount { get; set; }
+
         public int PointsUsed { get; set; }
 
         public int PointsEarned { get; set; }

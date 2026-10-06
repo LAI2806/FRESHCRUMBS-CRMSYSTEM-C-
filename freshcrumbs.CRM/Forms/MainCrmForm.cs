@@ -1,6 +1,7 @@
 ﻿using FontAwesome.Sharp;
 using freshcrumbs.CRM.winforms.Models;
 using freshcrumbs.CRM.winforms.UserControls;
+using System.Windows.Input;
 
 namespace freshcrumbs.CRM.winforms.Forms
 {
@@ -39,7 +40,41 @@ namespace freshcrumbs.CRM.winforms.Forms
             InitializeSidebar();
             InitializeMainContentContainer();
 
-            SetActiveModule("dashboard");
+            ApplyFeatureVisibility();
+            SetActiveModule(GetStartModule());
+        }
+
+        private static readonly Dictionary<string, string> ModuleFeatures = new()
+        {
+            ["dashboard"] = "BusinessIntelligence",
+            ["reports"] = "BusinessIntelligence",
+            ["products"] = "MainTransactions",
+            ["sales"] = "MainTransactions",
+            ["customers"] = "MainTransactions",
+            ["feedback"] = "DataCollection",
+            ["inquiries"] = "DataCollection",
+            ["promotions"] = "ActionsRetention",
+            ["loyalty"] = "ActionsRetention"
+        };
+
+        private bool IsModuleAllowed(string key)
+        {
+            return _currentCompany.EnabledFeatures == null
+                || !ModuleFeatures.TryGetValue(key, out var feature)
+                || _currentCompany.EnabledFeatures.Contains(feature);
+        }
+
+        private void ApplyFeatureVisibility()
+        {
+            foreach (var kvp in _navButtons)
+            {
+                kvp.Value.Visible = IsModuleAllowed(kvp.Key);
+            }
+        }
+
+        private string GetStartModule()
+        {
+            return _navButtons.Keys.FirstOrDefault(IsModuleAllowed) ?? "settings";
         }
         private void ShowProductManagement()
         {
@@ -70,6 +105,13 @@ namespace freshcrumbs.CRM.winforms.Forms
 
             var loyaltyControl = new LoyaltyControl(_currentCompany.CompanyId);
             _contentPanel.Controls.Add(loyaltyControl);
+        }
+        private void ShowReportsManagement()
+        {
+            _contentPanel.Controls.Clear();
+
+            var reportsControl = new ReportsControl(_currentCompany.CompanyId, SetActiveModule);
+            _contentPanel.Controls.Add(reportsControl);
         }
         private void InitializeForm()
         {
@@ -192,7 +234,8 @@ namespace freshcrumbs.CRM.winforms.Forms
                 (IconChar.Star, "Loyalty", "loyalty"),
                 (IconChar.Comment, "Feedback", "feedback"),
                 (IconChar.QuestionCircle, "Inquiries", "inquiries"),
-                (IconChar.CashRegister, "Sales", "sales")
+                (IconChar.CashRegister, "Sales", "sales"),
+                (IconChar.ChartLine, "Reports", "reports")
                         };
 
             foreach (var item in navItems)
@@ -273,7 +316,7 @@ namespace freshcrumbs.CRM.winforms.Forms
                 FlatStyle = FlatStyle.Flat,
                 BackColor = SidebarBg,
                 ForeColor = SidebarText,
-                Cursor = Cursors.Hand,
+                Cursor = System.Windows.Forms.Cursors.Hand,
                 Margin = new Padding(0, 0, 0, 6),
                 Padding = new Padding(0),
                 TextAlign = ContentAlignment.MiddleLeft,
@@ -456,6 +499,14 @@ namespace freshcrumbs.CRM.winforms.Forms
                         isActive ? Color.White : SidebarText,
                         20);
                 }
+
+                if (!IsModuleAllowed(key))
+                {
+                    ShowPlaceholder("Not available", "Your current subscription plan does not include this module.");
+                    return;
+                }
+
+
             }
 
 
@@ -493,6 +544,10 @@ namespace freshcrumbs.CRM.winforms.Forms
                     ShowInquiries();
                     break;
 
+                case "reports":
+                    ShowReportsManagement();
+                    break;
+
                 case "settings":
                     ShowPlaceholder(
                         "Settings",
@@ -505,182 +560,8 @@ namespace freshcrumbs.CRM.winforms.Forms
         {
             _contentPanel.Controls.Clear();
 
-            var dashboardLayout = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                ColumnCount = 1,
-                RowCount = 3,
-                BackColor = PageBg,
-                Margin = new Padding(0),
-                Padding = new Padding(0)
-            };
-
-            dashboardLayout.ColumnStyles.Add(
-                new ColumnStyle(SizeType.Percent, 100f));
-
-            dashboardLayout.RowStyles.Add(
-                new RowStyle(SizeType.Absolute, 55f));
-
-            dashboardLayout.RowStyles.Add(
-                new RowStyle(SizeType.Absolute, 120f));
-
-            dashboardLayout.RowStyles.Add(
-                new RowStyle(SizeType.Percent, 100f));
-
-            var header = new Label
-            {
-                Text = "Dashboard",
-                Font = new Font(
-                    "Segoe UI",
-                    20,
-                    FontStyle.Bold),
-                ForeColor =
-                    Color.FromArgb(50, 35, 25),
-                Dock = DockStyle.Fill,
-                TextAlign =
-                    ContentAlignment.MiddleLeft,
-                Margin = new Padding(0)
-            };
-
-            dashboardLayout.Controls.Add(
-                header,
-                0,
-                0);
-
-            var kpiTable = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                ColumnCount = 4,
-                RowCount = 1,
-                BackColor = PageBg,
-                Margin = new Padding(0)
-            };
-
-            for (int i = 0; i < 4; i++)
-            {
-                kpiTable.ColumnStyles.Add(
-                    new ColumnStyle(
-                        SizeType.Percent,
-                        25f));
-            }
-
-            kpiTable.RowStyles.Add(
-                new RowStyle(SizeType.Percent, 100f));
-
-            var kpiData =
-                new (string Title, string Value)[]
-                {
-                    ("Total Products", "--"),
-                    ("Total Customers", "--"),
-                    ("Active Promotions", "--"),
-                    ("Sales Summary", "--")
-                };
-
-            for (int i = 0; i < kpiData.Length; i++)
-            {
-                var card = CreateStatCard(
-                    kpiData[i].Title,
-                    kpiData[i].Value);
-
-                card.Dock = DockStyle.Fill;
-
-                card.Margin = new Padding(
-                    i == 0 ? 0 : 8,
-                    0,
-                    i == kpiData.Length - 1 ? 0 : 8,
-                    0);
-
-                kpiTable.Controls.Add(
-                    card,
-                    i,
-                    0);
-            }
-
-            dashboardLayout.Controls.Add(
-                kpiTable,
-                0,
-                1);
-
-            var sectionsTable = new TableLayoutPanel
-            {
-                ColumnCount = 2,
-                RowCount = 2,
-                Dock = DockStyle.Fill,
-                BackColor = PageBg,
-                Margin = new Padding(0, 10, 0, 0)
-            };
-
-            sectionsTable.ColumnStyles.Add(
-                new ColumnStyle(SizeType.Percent, 50f));
-
-            sectionsTable.ColumnStyles.Add(
-                new ColumnStyle(SizeType.Percent, 50f));
-
-            sectionsTable.RowStyles.Add(
-                new RowStyle(SizeType.Percent, 50f));
-
-            sectionsTable.RowStyles.Add(
-                new RowStyle(SizeType.Percent, 50f));
-
-            var salesSection = CreateSectionCard(
-                "Sales Summary",
-                "No sales data yet.");
-
-            salesSection.Dock = DockStyle.Fill;
-            salesSection.Margin =
-                new Padding(0, 0, 8, 8);
-
-            sectionsTable.Controls.Add(
-                salesSection,
-                0,
-                0);
-
-            var customerSection = CreateSectionCard(
-                "Customer Activity",
-                "No recent activity yet.");
-
-            customerSection.Dock = DockStyle.Fill;
-            customerSection.Margin =
-                new Padding(8, 0, 0, 8);
-
-            sectionsTable.Controls.Add(
-                customerSection,
-                1,
-                0);
-
-            var transactionsSection = CreateSectionCard(
-                "Recent Transactions",
-                "No transactions yet.");
-
-            transactionsSection.Dock = DockStyle.Fill;
-            transactionsSection.Margin =
-                new Padding(0, 8, 8, 0);
-
-            sectionsTable.Controls.Add(
-                transactionsSection,
-                0,
-                1);
-
-            var feedbackSection = CreateSectionCard(
-                "Active Promotions & Feedback",
-                "Nothing to show yet.");
-
-            feedbackSection.Dock = DockStyle.Fill;
-            feedbackSection.Margin =
-                new Padding(8, 8, 0, 0);
-
-            sectionsTable.Controls.Add(
-                feedbackSection,
-                1,
-                1);
-
-            dashboardLayout.Controls.Add(
-                sectionsTable,
-                0,
-                2);
-
-            _contentPanel.Controls.Add(
-                dashboardLayout);
+            var dashboardControl = new DashboardControl(_currentCompany.CompanyId, SetActiveModule);
+            _contentPanel.Controls.Add(dashboardControl);
         }
         private void ShowFeedbackManagement()
         {
@@ -690,96 +571,12 @@ namespace freshcrumbs.CRM.winforms.Forms
             _contentPanel.Controls.Add(feedbackControl);
         }
 
-        private Panel CreateStatCard(
-            string title,
-            string value)
-        {
-            var card = new Panel
-            {
-                BackColor = Color.White,
-                BorderStyle = BorderStyle.FixedSingle,
-                Padding = new Padding(18)
-            };
-
-            var titleLabel = new Label
-            {
-                Text = title,
-                Font = new Font(
-                    "Segoe UI",
-                    9.5f),
-                ForeColor = Color.Gray,
-                AutoSize = true,
-                Location = new Point(18, 18)
-            };
-
-            card.Controls.Add(titleLabel);
-
-            var valueLabel = new Label
-            {
-                Text = value,
-                Font = new Font(
-                    "Segoe UI",
-                    24,
-                    FontStyle.Bold),
-                ForeColor = AccentColor,
-                AutoSize = true,
-                Location = new Point(18, 48)
-            };
-
-            card.Controls.Add(valueLabel);
-
-            return card;
-        }
-
         private void ShowPromotionManagement()
         {
             _contentPanel.Controls.Clear();
 
             var promotionControl = new PromotionControl(_currentCompany.CompanyId);
             _contentPanel.Controls.Add(promotionControl);
-        }
-
-        private Panel CreateSectionCard(
-            string title,
-            string emptyMessage)
-        {
-            var card = new Panel
-            {
-                BackColor = Color.White,
-                BorderStyle = BorderStyle.FixedSingle,
-                Padding = new Padding(20)
-            };
-
-            var titleLabel = new Label
-            {
-                Text = title,
-                Font = new Font(
-                    "Segoe UI",
-                    12,
-                    FontStyle.Bold),
-                ForeColor =
-                    Color.FromArgb(50, 35, 25),
-                AutoSize = true,
-                Location = new Point(20, 20)
-            };
-
-            card.Controls.Add(titleLabel);
-
-            var messageLabel = new Label
-            {
-                Text = emptyMessage,
-                Font = new Font(
-                    "Segoe UI",
-                    9.5f,
-                    FontStyle.Italic),
-                ForeColor = Color.Gray,
-                AutoSize = true,
-                Location = new Point(20, 50)
-            };
-
-            card.Controls.Add(messageLabel);
-
-            return card;
         }
 
         private void ShowPlaceholder(

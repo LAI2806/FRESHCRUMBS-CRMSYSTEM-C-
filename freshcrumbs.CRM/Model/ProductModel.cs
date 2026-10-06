@@ -16,6 +16,12 @@
 
         public int Quantity { get; set; }
 
+        public int Sold { get; set; }
+
+        public int ReorderLevel { get; set; } = 10;
+
+        public string StockLevel { get; set; } = string.Empty;
+
         public string Status { get; set; } = string.Empty;
     }
 }

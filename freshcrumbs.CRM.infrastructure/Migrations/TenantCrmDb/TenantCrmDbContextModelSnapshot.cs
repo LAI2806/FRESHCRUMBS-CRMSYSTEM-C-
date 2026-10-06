@@ -79,6 +79,40 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
                     b.ToTable("Customers");
                 });
 
+            modelBuilder.Entity("freshcrumbs.CRM.domain.entities.CustomerDiscountEligibility", b =>
+                {
+                    b.Property<int>("EligibilityId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("EligibilityId"));
+
+                    b.Property<string>("Category")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
+
+                    b.Property<int>("CustomerId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("IdNumber")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
+
+                    b.Property<string>("VerificationStatus")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("nvarchar(30)");
+
+                    b.HasKey("EligibilityId");
+
+                    b.HasIndex("CustomerId", "Category")
+                        .IsUnique();
+
+                    b.ToTable("CustomerDiscountEligibilities");
+                });
+
             modelBuilder.Entity("freshcrumbs.CRM.domain.entities.Feedback", b =>
                 {
                     b.Property<int>("FeedbackId")
@@ -87,26 +121,31 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("FeedbackId"));
 
+                    b.Property<string>("Category")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("Comment")
+                        .IsRequired()
+                        .HasMaxLength(1000)
+                        .HasColumnType("nvarchar(1000)");
+
                     b.Property<int>("CustomerId")
                         .HasColumnType("int");
 
                     b.Property<DateTime>("DateSubmitted")
                         .HasColumnType("datetime2");
 
-                    b.Property<string>("Description")
-                        .IsRequired()
-                        .HasMaxLength(1000)
-                        .HasColumnType("nvarchar(1000)");
+                    b.Property<bool>("IsDeleted")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bit")
+                        .HasDefaultValue(false);
 
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasMaxLength(20)
                         .HasColumnType("nvarchar(20)");
-
-                    b.Property<string>("Subject")
-                        .IsRequired()
-                        .HasMaxLength(200)
-                        .HasColumnType("nvarchar(200)");
 
                     b.Property<string>("Type")
                         .IsRequired()
@@ -134,6 +173,11 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
                     b.Property<DateTime>("DateSubmitted")
                         .HasColumnType("datetime2");
 
+                    b.Property<bool>("IsDeleted")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bit")
+                        .HasDefaultValue(false);
+
                     b.Property<string>("Message")
                         .IsRequired()
                         .HasMaxLength(1000)
@@ -152,6 +196,11 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
                         .HasMaxLength(1000)
                         .HasColumnType("nvarchar(1000)");
 
+                    b.Property<string>("Source")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
+
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasMaxLength(20)
@@ -161,6 +210,11 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
                         .IsRequired()
                         .HasMaxLength(200)
                         .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("Type")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
 
                     b.HasKey("InquiryId");
 
@@ -182,6 +236,11 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
 
                     b.Property<DateTime>("Date")
                         .HasColumnType("datetime2");
+
+                    b.Property<bool>("IsDeleted")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bit")
+                        .HasDefaultValue(false);
 
                     b.Property<int>("PointsEarned")
                         .HasColumnType("int");
@@ -244,6 +303,11 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
                     b.Property<int>("Quantity")
                         .HasColumnType("int");
 
+                    b.Property<int>("ReorderLevel")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int")
+                        .HasDefaultValue(10);
+
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasMaxLength(20)
@@ -278,6 +342,10 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
                     b.Property<decimal>("DiscountValue")
                         .HasPrecision(18, 2)
                         .HasColumnType("decimal(18,2)");
+
+                    b.Property<string>("EligibilityCategory")
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
 
                     b.Property<DateTime>("EndDate")
                         .HasColumnType("datetime2");
@@ -317,6 +385,10 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("TransactionId"));
 
+                    b.Property<decimal>("CustomerDiscountAmount")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("decimal(18,2)");
+
                     b.Property<int>("CustomerId")
                         .HasColumnType("int");
 
@@ -327,6 +399,11 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
                     b.Property<decimal>("FinalAmount")
                         .HasPrecision(18, 2)
                         .HasColumnType("decimal(18,2)");
+
+                    b.Property<bool>("IsDeleted")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bit")
+                        .HasDefaultValue(false);
 
                     b.Property<string>("PaymentMethod")
                         .IsRequired()
@@ -395,6 +472,17 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
                     b.HasIndex("TransactionId");
 
                     b.ToTable("TransactionItems");
+                });
+
+            modelBuilder.Entity("freshcrumbs.CRM.domain.entities.CustomerDiscountEligibility", b =>
+                {
+                    b.HasOne("freshcrumbs.CRM.domain.entities.Customer", "Customer")
+                        .WithMany("DiscountEligibilities")
+                        .HasForeignKey("CustomerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Customer");
                 });
 
             modelBuilder.Entity("freshcrumbs.CRM.domain.entities.Feedback", b =>
@@ -472,6 +560,11 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
                     b.Navigation("Product");
 
                     b.Navigation("SalesTransaction");
+                });
+
+            modelBuilder.Entity("freshcrumbs.CRM.domain.entities.Customer", b =>
+                {
+                    b.Navigation("DiscountEligibilities");
                 });
 
             modelBuilder.Entity("freshcrumbs.CRM.domain.entities.Product", b =>

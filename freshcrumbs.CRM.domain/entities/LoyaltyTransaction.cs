@@ -20,6 +20,8 @@ namespace freshcrumbs.CRM.domain.entities
 
         public Customer? Customer { get; set; }
 
+        public bool IsDeleted { get; set; } = false;
+
         public SalesTransaction? SalesTransaction { get; set; }
     }
 }

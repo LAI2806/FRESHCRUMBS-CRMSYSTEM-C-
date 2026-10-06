@@ -1,11 +1,14 @@
-﻿using Microsoft.AspNetCore.Identity;
+﻿using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using freshcrumbs.CRM.domain.entities;
 using freshcrumbs.CRM.infrastructure.data;
+using freshcrumbs.CRM.api.Services;
 
 namespace freshcrumbs.CRM.api.Controllers
 {
+    [Authorize(Roles = PlatformRoles.SuperAdmin)]
     [ApiController]
     [Route("api/[controller]")]
     public class UsersController : ControllerBase
@@ -13,12 +16,16 @@ namespace freshcrumbs.CRM.api.Controllers
         private readonly UserManager<ApplicationUser> _userManager;
         private readonly MasterCrmDbContext _masterDb;
 
+        private readonly ISubscriptionService _subscriptions;
+
         public UsersController(
             UserManager<ApplicationUser> userManager,
-            MasterCrmDbContext masterDb)
+            MasterCrmDbContext masterDb,
+            ISubscriptionService subscriptions)
         {
             _userManager = userManager;
             _masterDb = masterDb;
+            _subscriptions = subscriptions;
         }
 
         public class CreateUserRequest
@@ -41,6 +48,11 @@ namespace freshcrumbs.CRM.api.Controllers
             public string Email { get; set; } = string.Empty;
             public string Role { get; set; } = string.Empty;
             public string Status { get; set; } = string.Empty;
+        }
+
+        public class ResetPasswordRequest
+        {
+            public string NewPassword { get; set; } = string.Empty;
         }
 
         [HttpGet]
@@ -118,7 +130,12 @@ namespace freshcrumbs.CRM.api.Controllers
             {
                 return BadRequest($"TenantId {request.TenantId} does not match any existing company.");
             }
+            var seatError = await _subscriptions.CheckCanActivateUserAsync(request.TenantId);
 
+            if (seatError != null)
+            {
+                return Conflict(new { message = seatError });
+            }
             var user = new ApplicationUser
             {
                 UserName = request.Username,
@@ -150,6 +167,19 @@ namespace freshcrumbs.CRM.api.Controllers
             {
                 return NotFound($"User with id {id} not found.");
             }
+            var isReactivating = user.TenantId != null
+                && !string.Equals(user.Status, "Active", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(request.Status, "Active", StringComparison.OrdinalIgnoreCase);
+
+            if (isReactivating)
+            {
+                var seatError = await _subscriptions.CheckCanActivateUserAsync(user.TenantId!.Value);
+
+                if (seatError != null)
+                {
+                    return Conflict(new { message = seatError });
+                }
+            }
 
             user.FirstName = request.FirstName;
             user.LastName = request.LastName;
@@ -177,6 +207,39 @@ namespace freshcrumbs.CRM.api.Controllers
                 user.Role,
                 user.Status
             });
+        }
+
+        // SuperAdmin-only: sets a new password for an existing user without needing the current one.
+        // Uses the standard Identity token flow so the configured password rules are enforced.
+        [HttpPost("{id}/reset-password")]
+        [Authorize(Roles = PlatformRoles.SuperAdmin)]
+        public async Task<IActionResult> ResetPassword(string id, ResetPasswordRequest request)
+        {
+            if (string.IsNullOrWhiteSpace(request.NewPassword))
+            {
+                return BadRequest(new { message = "NewPassword is required." });
+            }
+
+            var user = await _userManager.FindByIdAsync(id);
+
+            if (user == null)
+            {
+                return NotFound($"User with id {id} not found.");
+            }
+
+            var token = await _userManager.GeneratePasswordResetTokenAsync(user);
+            var result = await _userManager.ResetPasswordAsync(user, token, request.NewPassword);
+
+            if (!result.Succeeded)
+            {
+                return BadRequest(result.Errors);
+            }
+
+            // Clear any lockout caused by earlier failed login attempts.
+            await _userManager.SetLockoutEndDateAsync(user, null);
+            await _userManager.ResetAccessFailedCountAsync(user);
+
+            return Ok(new { message = "Password reset successfully.", user.Id, user.UserName });
         }
 
         [HttpDelete("{id}")]

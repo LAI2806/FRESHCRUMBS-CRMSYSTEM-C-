@@ -20,6 +20,8 @@ namespace freshcrumbs.CRM.winforms.UserControls
         private const string FilterActive = "Active";
         private const string FilterInactive = "Inactive";
 
+        private const int PageSize = 50;
+
         private DataGridView _promotionGrid = null!;
         private TextBox _searchBox = null!;
         private ComboBox _statusFilterBox = null!;
@@ -28,8 +30,14 @@ namespace freshcrumbs.CRM.winforms.UserControls
         private Button _deleteButton = null!;
         private Button _reactivateButton = null!;
         private Label _statusLabel = null!;
+        private Panel _pagerPanel = null!;
+        private Label _pageInfoLabel = null!;
+        private Button _prevPageButton = null!;
+        private Button _nextPageButton = null!;
 
         private List<PromotionModel> _promotions = new();
+        private List<PromotionModel> _filteredPromotions = new();
+        private int _currentPage = 1;
 
         public PromotionControl(int companyId)
         {
@@ -180,6 +188,9 @@ namespace freshcrumbs.CRM.winforms.UserControls
             gridContainer.Controls.Add(_promotionGrid);
             rootLayout.Controls.Add(gridContainer, 0, 2);
 
+            _pagerPanel = CreatePagerPanel();
+            gridContainer.Controls.Add(_pagerPanel);
+
             _statusLabel = new Label
             {
                 Text = "",
@@ -220,6 +231,105 @@ namespace freshcrumbs.CRM.winforms.UserControls
             return button;
         }
 
+        private Panel CreatePagerPanel()
+        {
+            var panel = new Panel
+            {
+                Dock = DockStyle.Bottom,
+                Height = 40
+            };
+
+            _pageInfoLabel = new Label
+            {
+                AutoSize = true,
+                Font = new Font("Segoe UI", 9.5f),
+                ForeColor = LabelGray,
+                Location = new Point(0, 11),
+                Text = "Page 1 of 1"
+            };
+            panel.Controls.Add(_pageInfoLabel);
+
+            _nextPageButton = new Button
+            {
+                Text = "Next \u203A",
+                Width = 90,
+                Height = 30,
+                Font = new Font("Segoe UI", 9.5f),
+                BackColor = Color.White,
+                ForeColor = LabelGray,
+                FlatStyle = FlatStyle.Flat,
+                Cursor = Cursors.Hand,
+                Enabled = false
+            };
+            _nextPageButton.FlatAppearance.BorderSize = 1;
+            _nextPageButton.FlatAppearance.BorderColor = BorderColor;
+            _nextPageButton.Click += (s, e) => ChangePage(1);
+            panel.Controls.Add(_nextPageButton);
+
+            _prevPageButton = new Button
+            {
+                Text = "\u2039 Previous",
+                Width = 90,
+                Height = 30,
+                Font = new Font("Segoe UI", 9.5f),
+                BackColor = Color.White,
+                ForeColor = LabelGray,
+                FlatStyle = FlatStyle.Flat,
+                Cursor = Cursors.Hand,
+                Enabled = false
+            };
+            _prevPageButton.FlatAppearance.BorderSize = 1;
+            _prevPageButton.FlatAppearance.BorderColor = BorderColor;
+            _prevPageButton.Click += (s, e) => ChangePage(-1);
+            panel.Controls.Add(_prevPageButton);
+
+            panel.Resize += (s, e) => PositionPagerButtons(panel);
+            PositionPagerButtons(panel);
+
+            return panel;
+        }
+
+        private void PositionPagerButtons(Panel pagerPanel)
+        {
+            _nextPageButton.Location = new Point(pagerPanel.Width - _nextPageButton.Width, 5);
+            _prevPageButton.Location = new Point(_nextPageButton.Left - _prevPageButton.Width - 10, 5);
+        }
+
+        private void ChangePage(int delta)
+        {
+            _currentPage += delta;
+            RenderCurrentPage();
+        }
+
+        private void RenderCurrentPage()
+        {
+            int totalRecords = _filteredPromotions.Count;
+            int totalPages = totalRecords == 0 ? 1 : (int)Math.Ceiling(totalRecords / (double)PageSize);
+
+            if (_currentPage > totalPages)
+            {
+                _currentPage = totalPages;
+            }
+            if (_currentPage < 1)
+            {
+                _currentPage = 1;
+            }
+
+            var pageItems = _filteredPromotions
+                .Skip((_currentPage - 1) * PageSize)
+                .Take(PageSize)
+                .ToList();
+
+            BindGrid(pageItems);
+
+            _pageInfoLabel.Text = totalRecords == 0
+                ? "No records"
+                : $"Page {_currentPage} of {totalPages} ({totalRecords} {(totalRecords == 1 ? "record" : "records")})";
+
+            _prevPageButton.Enabled = _currentPage > 1;
+            _nextPageButton.Enabled = _currentPage < totalPages;
+        }
+
         private async void PromotionControl_Load(object? sender, EventArgs e)
         {
             await LoadPromotionsAsync();
@@ -250,7 +360,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
             return _statusFilterBox.SelectedItem?.ToString() ?? FilterActive;
         }
 
-        private void ApplyFilters()
+        private void ApplyFilters(bool resetPage = true)
         {
             IEnumerable<PromotionModel> filtered = _promotions;
 
@@ -267,7 +377,14 @@ namespace freshcrumbs.CRM.winforms.UserControls
                 filtered = filtered.Where(p => p.PromotionName.ToLowerInvariant().Contains(term));
             }
 
-            BindGrid(filtered.ToList());
+            _filteredPromotions = filtered.ToList();
+
+            if (resetPage)
+            {
+                _currentPage = 1;
+            }
+
+            RenderCurrentPage();
         }
 
         private void BindGrid(List<PromotionModel> promotions)

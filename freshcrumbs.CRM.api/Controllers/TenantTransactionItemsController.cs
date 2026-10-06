@@ -94,6 +94,15 @@ namespace freshcrumbs.CRM.api.Controllers
                 return BadRequest($"TransactionId {transactionId} does not exist for this tenant.");
             }
 
+            var isLocked = await tenantDb.SalesTransactions
+                .AnyAsync(x => x.TransactionId == transactionId
+                    && (x.IsDeleted || x.Status == "Cancelled"));
+
+            if (isLocked)
+            {
+                return Conflict("Items cannot be changed because this transaction is cancelled or deleted.");
+            }
+
             var product = await tenantDb.Products
                 .FirstOrDefaultAsync(x => x.ProductId == item.ProductId);
 
@@ -131,7 +140,6 @@ namespace freshcrumbs.CRM.api.Controllers
         }
 
         [HttpPut("{id:int}")]
-        [HttpPut("{id:int}")]
         public async Task<IActionResult> UpdateItem(int companyId, int transactionId, int id, TransactionItem updated)
         {
             await using var tenantDb = await _tenantFactory.CreateAsync(companyId);
@@ -142,6 +150,15 @@ namespace freshcrumbs.CRM.api.Controllers
             if (item == null)
             {
                 return NotFound($"TransactionItem with id {id} not found for transaction {transactionId}.");
+            }
+
+            var isLocked = await tenantDb.SalesTransactions
+                .AnyAsync(x => x.TransactionId == transactionId
+                    && (x.IsDeleted || x.Status == "Cancelled"));
+
+            if (isLocked)
+            {
+                return Conflict("Items cannot be changed because this transaction is cancelled or deleted.");
             }
 
             var product = await tenantDb.Products
@@ -212,6 +229,15 @@ namespace freshcrumbs.CRM.api.Controllers
             if (item == null)
             {
                 return NotFound($"TransactionItem with id {id} not found for transaction {transactionId}.");
+            }
+
+            var isLocked = await tenantDb.SalesTransactions
+                .AnyAsync(x => x.TransactionId == transactionId
+                    && (x.IsDeleted || x.Status == "Cancelled"));
+
+            if (isLocked)
+            {
+                return Conflict("Items cannot be changed because this transaction is cancelled or deleted.");
             }
 
             var product = await tenantDb.Products

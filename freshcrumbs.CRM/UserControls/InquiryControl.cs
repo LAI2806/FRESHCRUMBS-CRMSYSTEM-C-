@@ -16,15 +16,37 @@ namespace freshcrumbs.CRM.winforms.UserControls
         private static readonly Color PageBg = Color.FromArgb(244, 244, 246);
         private static readonly Color HeaderRowColor = Color.FromArgb(250, 246, 242);
 
+        private const int PageSize = 50;
+
         private DataGridView _inquiryGrid = null!;
         private TextBox _searchBox = null!;
         private Button _addButton = null!;
         private Button _editButton = null!;
-        private Button _actionButton = null!;
+
+        private Button _deleteButton = null!;
         private Label _statusLabel = null!;
+        private Panel _pagerPanel = null!;
+        private Label _pageInfoLabel = null!;
+        private Button _prevPageButton = null!;
+        private Button _nextPageButton = null!;
 
         private List<InquiryModel> _inquiries = new();
         private List<CustomerModel> _customers = new();
+        private List<InquiryDisplayRow> _filteredRows = new();
+        private int _currentPage = 1;
+
+        private class InquiryDisplayRow
+        {
+            public int InquiryId { get; set; }
+            public string CustomerCode { get; set; } = string.Empty;
+            public string CustomerName { get; set; } = string.Empty;
+            public string Type { get; set; } = string.Empty;
+            public DateTime DateSubmitted { get; set; }
+            public string Source { get; set; } = string.Empty;
+            public string Concern { get; set; } = string.Empty;
+            public string Status { get; set; } = string.Empty;
+            public string RespondedBy { get; set; } = string.Empty;
+        }
 
         public InquiryControl(int companyId)
         {
@@ -71,7 +93,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
                 Height = 34,
                 Font = new Font("Segoe UI", 10),
                 BorderStyle = BorderStyle.FixedSingle,
-                PlaceholderText = "Search by subject or customer..."
+                PlaceholderText = "Search by subject, code, or customer..."
             };
             _searchBox.TextChanged += (s, e) => BindGrid();
             toolbarPanel.Controls.Add(_searchBox);
@@ -81,7 +103,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
             _addButton.Click += AddButton_Click;
             toolbarPanel.Controls.Add(_addButton);
 
-            _editButton = CreateActionButton("Edit", Color.White, LabelGray, 100);
+            _editButton = CreateActionButton("Review / Process", Color.White, LabelGray, 150);
             _editButton.FlatAppearance.BorderSize = 1;
             _editButton.FlatAppearance.BorderColor = BorderColor;
             _editButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
@@ -89,13 +111,15 @@ namespace freshcrumbs.CRM.winforms.UserControls
             _editButton.Click += EditButton_Click;
             toolbarPanel.Controls.Add(_editButton);
 
-            _actionButton = CreateActionButton("Start", Color.White, AccentColor, 100);
-            _actionButton.FlatAppearance.BorderSize = 1;
-            _actionButton.FlatAppearance.BorderColor = AccentColor;
-            _actionButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-            _actionButton.Enabled = false;
-            _actionButton.Click += ActionButton_Click;
-            toolbarPanel.Controls.Add(_actionButton);
+            _deleteButton = CreateActionButton("Delete", Color.White, Color.Firebrick, 100);
+            _deleteButton.FlatAppearance.BorderSize = 1;
+            _deleteButton.FlatAppearance.BorderColor = Color.Firebrick;
+            _deleteButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            _deleteButton.Enabled = false;
+            _deleteButton.Click += DeleteButton_Click;
+            toolbarPanel.Controls.Add(_deleteButton);
+
+            toolbarPanel.Resize += (s, e) => PositionToolbarButtons(toolbarPanel);
 
             toolbarPanel.Resize += (s, e) => PositionToolbarButtons(toolbarPanel);
             PositionToolbarButtons(toolbarPanel);
@@ -131,6 +155,9 @@ namespace freshcrumbs.CRM.winforms.UserControls
             gridContainer.Controls.Add(_inquiryGrid);
             rootLayout.Controls.Add(gridContainer, 0, 2);
 
+            _pagerPanel = CreatePagerPanel();
+            gridContainer.Controls.Add(_pagerPanel);
+
             _statusLabel = new Label
             {
                 Text = "",
@@ -149,7 +176,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
         {
             _addButton.Location = new Point(toolbarPanel.Width - _addButton.Width, 8);
             _editButton.Location = new Point(_addButton.Left - _editButton.Width - 10, 8);
-            _actionButton.Location = new Point(_editButton.Left - _actionButton.Width - 10, 8);
+            _deleteButton.Location = new Point(_editButton.Left - _deleteButton.Width - 10, 8);
         }
 
         private Button CreateActionButton(string text, Color backColor, Color foreColor, int width)
@@ -169,6 +196,126 @@ namespace freshcrumbs.CRM.winforms.UserControls
             return button;
         }
 
+        private Panel CreatePagerPanel()
+        {
+            var panel = new Panel
+            {
+                Dock = DockStyle.Bottom,
+                Height = 40
+            };
+
+            _pageInfoLabel = new Label
+            {
+                AutoSize = true,
+                Font = new Font("Segoe UI", 9.5f),
+                ForeColor = LabelGray,
+                Location = new Point(0, 11),
+                Text = "Page 1 of 1"
+            };
+            panel.Controls.Add(_pageInfoLabel);
+
+            _nextPageButton = new Button
+            {
+                Text = "Next \u203A",
+                Width = 90,
+                Height = 30,
+                Font = new Font("Segoe UI", 9.5f),
+                BackColor = Color.White,
+                ForeColor = LabelGray,
+                FlatStyle = FlatStyle.Flat,
+                Cursor = Cursors.Hand,
+                Enabled = false
+            };
+            _nextPageButton.FlatAppearance.BorderSize = 1;
+            _nextPageButton.FlatAppearance.BorderColor = BorderColor;
+            _nextPageButton.Click += (s, e) => ChangePage(1);
+            panel.Controls.Add(_nextPageButton);
+
+            _prevPageButton = new Button
+            {
+                Text = "\u2039 Previous",
+                Width = 90,
+                Height = 30,
+                Font = new Font("Segoe UI", 9.5f),
+                BackColor = Color.White,
+                ForeColor = LabelGray,
+                FlatStyle = FlatStyle.Flat,
+                Cursor = Cursors.Hand,
+                Enabled = false
+            };
+            _prevPageButton.FlatAppearance.BorderSize = 1;
+            _prevPageButton.FlatAppearance.BorderColor = BorderColor;
+            _prevPageButton.Click += (s, e) => ChangePage(-1);
+            panel.Controls.Add(_prevPageButton);
+
+            panel.Resize += (s, e) => PositionPagerButtons(panel);
+            PositionPagerButtons(panel);
+
+            return panel;
+        }
+
+        private void PositionPagerButtons(Panel pagerPanel)
+        {
+            _nextPageButton.Location = new Point(pagerPanel.Width - _nextPageButton.Width, 5);
+            _prevPageButton.Location = new Point(_nextPageButton.Left - _prevPageButton.Width - 10, 5);
+        }
+
+        private void ChangePage(int delta)
+        {
+            _currentPage += delta;
+            RenderCurrentPage();
+        }
+
+        private void RenderCurrentPage()
+        {
+            int totalRecords = _filteredRows.Count;
+            int totalPages = totalRecords == 0 ? 1 : (int)Math.Ceiling(totalRecords / (double)PageSize);
+
+            if (_currentPage > totalPages)
+            {
+                _currentPage = totalPages;
+            }
+            if (_currentPage < 1)
+            {
+                _currentPage = 1;
+            }
+
+            var pageItems = _filteredRows
+                .Skip((_currentPage - 1) * PageSize)
+                .Take(PageSize)
+                .ToList();
+
+            _inquiryGrid.AutoGenerateColumns = true;
+            _inquiryGrid.DataSource = null;
+            _inquiryGrid.DataSource = pageItems;
+
+            if (_inquiryGrid.Columns["InquiryId"] != null)
+            {
+                _inquiryGrid.Columns["InquiryId"].Visible = false;
+            }
+
+            SetHeader("CustomerCode", "Customer Code");
+            SetHeader("CustomerName", "Customer Name");
+            SetHeader("Type", "Type");
+            SetHeader("DateSubmitted", "Date Received");
+            SetHeader("Source", "Source");
+            SetHeader("Concern", "Concern");
+            SetHeader("Status", "Status");
+            SetHeader("RespondedBy", "Responded By");
+
+            if (_inquiryGrid.Columns["DateSubmitted"] != null)
+            {
+                _inquiryGrid.Columns["DateSubmitted"].DefaultCellStyle.Format = "MM/dd/yyyy";
+            }
+
+            _pageInfoLabel.Text = totalRecords == 0
+                ? "No records"
+                : $"Page {_currentPage} of {totalPages} ({totalRecords} {(totalRecords == 1 ? "record" : "records")})";
+
+            _prevPageButton.Enabled = _currentPage > 1;
+            _nextPageButton.Enabled = _currentPage < totalPages;
+        }
+
         private async void InquiryControl_Load(object? sender, EventArgs e)
         {
             await LoadDataAsync();
@@ -179,7 +326,8 @@ namespace freshcrumbs.CRM.winforms.UserControls
             try
             {
                 _statusLabel.Text = "";
-                _customers = await _apiService.GetCustomersAsync(_companyId);
+                // Include inactive customers so older records still show their Customer Code and name.
+                _customers = await _apiService.GetCustomersAsync(_companyId, includeInactive: true);
                 _inquiries = await _apiService.GetInquiriesAsync(_companyId);
                 BindGrid();
             }
@@ -189,47 +337,36 @@ namespace freshcrumbs.CRM.winforms.UserControls
             }
         }
 
-        private void BindGrid()
+        private void BindGrid(bool resetPage = true)
         {
             string term = _searchBox?.Text.Trim().ToLowerInvariant() ?? "";
 
-            var displayRows = _inquiries
-                .Select(i => new
+            _filteredRows = _inquiries
+                .Select(i => new InquiryDisplayRow
                 {
-                    i.InquiryId,
+                    InquiryId = i.InquiryId,
+                    CustomerCode = GetCustomerCode(i.CustomerId),
                     CustomerName = GetCustomerName(i.CustomerId),
-                    i.Subject,
-                    i.Message,
-                    i.DateSubmitted,
-                    i.Status,
-                    i.Response
+                    Type = i.Type,
+                    DateSubmitted = i.DateSubmitted,
+                    Source = i.Source,
+                    Concern = i.Message,
+                    Status = i.Status,
+                    RespondedBy = i.RespondedBy
                 })
                 .Where(row =>
                     string.IsNullOrEmpty(term) ||
-                    row.Subject.ToLowerInvariant().Contains(term) ||
+                    row.Concern.ToLowerInvariant().Contains(term) ||
+                    row.CustomerCode.ToLowerInvariant().Contains(term) ||
                     row.CustomerName.ToLowerInvariant().Contains(term))
                 .ToList();
 
-            _inquiryGrid.AutoGenerateColumns = true;
-            _inquiryGrid.DataSource = null;
-            _inquiryGrid.DataSource = displayRows;
-
-            if (_inquiryGrid.Columns["InquiryId"] != null)
+            if (resetPage)
             {
-                _inquiryGrid.Columns["InquiryId"].Visible = false;
+                _currentPage = 1;
             }
 
-            SetHeader("CustomerName", "Customer");
-            SetHeader("Subject", "Subject");
-            SetHeader("Message", "Message");
-            SetHeader("DateSubmitted", "Date");
-            SetHeader("Status", "Status");
-            SetHeader("Response", "Response");
-
-            if (_inquiryGrid.Columns["DateSubmitted"] != null)
-            {
-                _inquiryGrid.Columns["DateSubmitted"].DefaultCellStyle.Format = "MM/dd/yyyy";
-            }
+            RenderCurrentPage();
         }
 
         private void SetHeader(string column, string text)
@@ -238,6 +375,12 @@ namespace freshcrumbs.CRM.winforms.UserControls
             {
                 _inquiryGrid.Columns[column].HeaderText = text;
             }
+        }
+
+        private string GetCustomerCode(int customerId)
+        {
+            var customer = _customers.FirstOrDefault(c => c.CustomerId == customerId);
+            return customer != null ? customer.CustomerCode : string.Empty;
         }
 
         private string GetCustomerName(int customerId)
@@ -260,34 +403,9 @@ namespace freshcrumbs.CRM.winforms.UserControls
 
         private void InquiryGrid_SelectionChanged(object? sender, EventArgs e)
         {
-            var selected = GetSelectedInquiry();
-            _editButton.Enabled = selected != null;
-
-            if (selected == null)
-            {
-                _actionButton.Enabled = false;
-                return;
-            }
-
-            switch (selected.Status)
-            {
-                case "Pending":
-                    _actionButton.Text = "Start";
-                    _actionButton.Enabled = true;
-                    break;
-                case "In Progress":
-                    _actionButton.Text = "Respond";
-                    _actionButton.Enabled = true;
-                    break;
-                case "Answered":
-                    _actionButton.Text = "Close";
-                    _actionButton.Enabled = true;
-                    break;
-                default:
-                    _actionButton.Text = "Closed";
-                    _actionButton.Enabled = false;
-                    break;
-            }
+            bool hasSelection = GetSelectedInquiry() != null;
+            _editButton.Enabled = hasSelection;
+            _deleteButton.Enabled = hasSelection;
         }
 
         private async void AddButton_Click(object? sender, EventArgs e)
@@ -336,7 +454,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
             }
         }
 
-        private async void ActionButton_Click(object? sender, EventArgs e)
+        private async void DeleteButton_Click(object? sender, EventArgs e)
         {
             var selected = GetSelectedInquiry();
             if (selected == null)
@@ -344,34 +462,28 @@ namespace freshcrumbs.CRM.winforms.UserControls
                 return;
             }
 
+            var confirm = MessageBox.Show(
+                "Are you sure you want to delete this inquiry? It will be hidden from the list but the record will be kept.",
+                "Confirm Delete",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+
+            if (confirm != DialogResult.Yes)
+            {
+                return;
+            }
+
             try
             {
-                if (selected.Status == "Pending")
-                {
-                    await _apiService.UpdateInquiryStatusAsync(_companyId, selected.InquiryId, "In Progress");
-                }
-                else if (selected.Status == "In Progress")
-                {
-                    using var dialog = new InquiryRespondDialog(selected.Subject, selected.Message);
-                    if (dialog.ShowDialog(this) != DialogResult.OK)
-                    {
-                        return;
-                    }
-
-                    await _apiService.RespondToInquiryAsync(_companyId, selected.InquiryId, dialog.ResponseText, "Staff");
-                }
-                else if (selected.Status == "Answered")
-                {
-                    await _apiService.UpdateInquiryStatusAsync(_companyId, selected.InquiryId, "Closed");
-                }
-
+                await _apiService.DeleteInquiryAsync(_companyId, selected.InquiryId);
                 await LoadDataAsync();
                 _statusLabel.Text = "";
             }
             catch (Exception ex)
             {
-                _statusLabel.Text = $"Failed to update inquiry: {ErrorMessageHelper.GetFriendlyMessage(ex)}";
+                _statusLabel.Text = $"Failed to delete inquiry: {ErrorMessageHelper.GetFriendlyMessage(ex)}";
             }
         }
+
     }
 }

@@ -17,6 +17,8 @@ namespace freshcrumbs.CRM.domain.entities
 
         public decimal DiscountAmount { get; set; }
 
+        public decimal CustomerDiscountAmount { get; set; }
+
         public int PointsUsed { get; set; }
 
         public int PointsEarned { get; set; }
@@ -30,6 +32,7 @@ namespace freshcrumbs.CRM.domain.entities
         public Customer? Customer { get; set; }
 
         public Promotion? Promotion { get; set; }
+        public bool IsDeleted { get; set; } = false;
 
         public ICollection<TransactionItem> TransactionItems { get; set; } = new List<TransactionItem>();
     }

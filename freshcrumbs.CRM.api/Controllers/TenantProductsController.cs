@@ -32,6 +32,21 @@ namespace freshcrumbs.CRM.api.Controllers
                 .OrderBy(x => x.ProductId)
                 .ToListAsync();
 
+            var soldByProduct = await tenantDb.TransactionItems
+                .AsNoTracking()
+                .Where(i => i.SalesTransaction != null
+                    && i.SalesTransaction.Status == "Completed"
+                    && !i.SalesTransaction.IsDeleted)
+                .GroupBy(i => i.ProductId)
+                .Select(g => new { ProductId = g.Key, Sold = g.Sum(i => i.Quantity) })
+                .ToListAsync();
+
+            foreach (var product in products)
+            {
+                product.Sold = soldByProduct
+                    .FirstOrDefault(s => s.ProductId == product.ProductId)?.Sold ?? 0;
+            }
+
             return Ok(products);
         }
 
@@ -49,12 +64,30 @@ namespace freshcrumbs.CRM.api.Controllers
                 return NotFound($"Product with id {id} not found.");
             }
 
+            product.Sold = await tenantDb.TransactionItems
+                .AsNoTracking()
+                .Where(i => i.ProductId == id
+                    && i.SalesTransaction != null
+                    && i.SalesTransaction.Status == "Completed"
+                    && !i.SalesTransaction.IsDeleted)
+                .SumAsync(i => i.Quantity);
+
             return Ok(product);
         }
 
         [HttpPost]
         public async Task<IActionResult> CreateProduct(int companyId, Product product)
         {
+            if (product.Quantity < 0)
+            {
+                return BadRequest("Stock cannot be negative.");
+            }
+
+            if (product.ReorderLevel < 0)
+            {
+                return BadRequest("Reorder level cannot be negative.");
+            }
+
             await using var tenantDb = await _tenantFactory.CreateAsync(companyId);
 
             tenantDb.Products.Add(product);
@@ -68,6 +101,16 @@ namespace freshcrumbs.CRM.api.Controllers
         [HttpPut("{id:int}")]
         public async Task<IActionResult> UpdateProduct(int companyId, int id, Product updated)
         {
+            if (updated.Quantity < 0)
+            {
+                return BadRequest("Stock cannot be negative.");
+            }
+
+            if (updated.ReorderLevel < 0)
+            {
+                return BadRequest("Reorder level cannot be negative.");
+            }
+
             await using var tenantDb = await _tenantFactory.CreateAsync(companyId);
 
             var product = await tenantDb.Products.FirstOrDefaultAsync(x => x.ProductId == id);
@@ -83,6 +126,7 @@ namespace freshcrumbs.CRM.api.Controllers
             product.Description = updated.Description;
             product.Price = updated.Price;
             product.Quantity = updated.Quantity;
+            product.ReorderLevel = updated.ReorderLevel;
             product.Status = updated.Status;
 
             await tenantDb.SaveChangesAsync();

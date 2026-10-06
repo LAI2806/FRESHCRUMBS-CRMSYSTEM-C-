@@ -17,18 +17,23 @@ namespace freshcrumbs.CRM.api.Controllers
         }
 
         [HttpGet]
-        public async Task<IActionResult> GetFeedback(int companyId)
+        public async Task<IActionResult> GetFeedback(int companyId, bool includeDeleted = false)
         {
             await using var tenantDb = await _tenantFactory.CreateAsync(companyId);
 
-            var feedback = await tenantDb.Feedbacks
-                .AsNoTracking()
+            var query = tenantDb.Feedbacks.AsNoTracking();
+
+            if (!includeDeleted)
+            {
+                query = query.Where(x => !x.IsDeleted);
+            }
+
+            var feedback = await query
                 .OrderBy(x => x.FeedbackId)
                 .ToListAsync();
 
             return Ok(feedback);
         }
-
         [HttpGet("{id:int}")]
         public async Task<IActionResult> GetFeedbackById(int companyId, int id)
         {
@@ -80,8 +85,8 @@ namespace freshcrumbs.CRM.api.Controllers
             }
 
             feedback.Type = updated.Type;
-            feedback.Subject = updated.Subject;
-            feedback.Description = updated.Description;
+            feedback.Category = updated.Category;
+            feedback.Comment = updated.Comment;
             feedback.DateSubmitted = updated.DateSubmitted;
 
             await tenantDb.SaveChangesAsync();
@@ -119,7 +124,7 @@ namespace freshcrumbs.CRM.api.Controllers
                 return NotFound($"Feedback with id {id} not found.");
             }
 
-            tenantDb.Feedbacks.Remove(feedback);
+            feedback.IsDeleted = true;
             await tenantDb.SaveChangesAsync();
 
             return NoContent();

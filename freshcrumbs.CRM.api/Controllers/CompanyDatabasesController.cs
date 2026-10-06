@@ -1,10 +1,12 @@
-﻿using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using freshcrumbs.CRM.domain.entities;
 using freshcrumbs.CRM.infrastructure.data;
 
 namespace freshcrumbs.CRM.api.Controllers
 {
+    [Authorize(Roles = PlatformRoles.SuperAdmin)]
     [ApiController]
     [Route("api/[controller]")]
     public class CompanyDatabasesController : ControllerBase

@@ -8,7 +8,7 @@ namespace freshcrumbs.CRM.winforms
         static void Main()
         {
             ApplicationConfiguration.Initialize();
-            Application.Run(new TenantSelectionForm());
+            Application.Run(new LoginForm());
         }
     }
 }

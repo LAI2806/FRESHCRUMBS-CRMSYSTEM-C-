@@ -23,5 +23,9 @@ namespace freshcrumbs.CRM.domain.entities
         public DateTime EndDate { get; set; }
 
         public string Status { get; set; } = "Active";
+
+        // When set (e.g. "Senior Citizen"), only customers with a Verified eligibility
+        // record for this category may use this promotion. Null/empty = open to everyone.
+        public string? EligibilityCategory { get; set; }
     }
 }

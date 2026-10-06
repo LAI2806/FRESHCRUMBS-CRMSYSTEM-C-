@@ -23,6 +23,7 @@ namespace freshcrumbs.CRM.winforms.Forms
         private TextBox _descriptionBox = null!;
         private NumericUpDown _priceBox = null!;
         private NumericUpDown _quantityBox = null!;
+        private NumericUpDown _reorderBox = null!;
         private ComboBox _statusBox = null!;
         private Label _errorLabel = null!;
 
@@ -49,6 +50,7 @@ namespace freshcrumbs.CRM.winforms.Forms
                     Description = existingProduct.Description,
                     Price = existingProduct.Price,
                     Quantity = existingProduct.Quantity,
+                    ReorderLevel = existingProduct.ReorderLevel,
                     Status = existingProduct.Status
                 };
 
@@ -58,6 +60,7 @@ namespace freshcrumbs.CRM.winforms.Forms
                 _descriptionBox.Text = Result.Description;
                 _priceBox.Value = Result.Price;
                 _quantityBox.Value = Result.Quantity;
+                _reorderBox.Value = Result.ReorderLevel;
                 _statusBox.Text = Result.Status;
             }
         }
@@ -144,7 +147,10 @@ namespace freshcrumbs.CRM.winforms.Forms
 
             _priceBox = AddNumericField(root, "Price", 0, 999999, true);
 
-            _quantityBox = AddNumericField(root, "Quantity", 0, 999999, false);
+            _quantityBox = AddNumericField(root, "Stock", 0, 999999, false);
+
+            _reorderBox = AddNumericField(root, "Reorder", 0, 999999, false);
+            _reorderBox.Value = 10;
 
             _statusBox = new ComboBox
             {
@@ -354,9 +360,15 @@ namespace freshcrumbs.CRM.winforms.Forms
                 return;
             }
 
-            if (!ValidationHelper.IsPositive((int)_quantityBox.Value))
+            if (!ValidationHelper.IsNonNegative((int)_quantityBox.Value))
             {
-                ShowFieldError(_quantityBox, "Quantity must be greater than 0.");
+                ShowFieldError(_quantityBox, "Stock cannot be negative.");
+                return;
+            }
+
+            if (!ValidationHelper.IsNonNegative((int)_reorderBox.Value))
+            {
+                ShowFieldError(_reorderBox, "Reorder cannot be negative.");
                 return;
             }
 
@@ -372,6 +384,7 @@ namespace freshcrumbs.CRM.winforms.Forms
             Result.Description = description;
             Result.Price = _priceBox.Value;
             Result.Quantity = (int)_quantityBox.Value;
+            Result.ReorderLevel = (int)_reorderBox.Value;
             Result.Status = _isEditMode ? _statusBox.Text : "Active";
 
             DialogResult = DialogResult.OK;
@@ -393,6 +406,7 @@ namespace freshcrumbs.CRM.winforms.Forms
             _descriptionBox.BackColor = ValidFieldColor;
             _priceBox.BackColor = ValidFieldColor;
             _quantityBox.BackColor = ValidFieldColor;
+            _reorderBox.BackColor = ValidFieldColor;
             _statusBox.BackColor = ValidFieldColor;
         }
     }

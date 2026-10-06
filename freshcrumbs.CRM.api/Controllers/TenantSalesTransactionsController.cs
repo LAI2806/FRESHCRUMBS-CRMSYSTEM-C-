@@ -9,6 +9,10 @@ namespace freshcrumbs.CRM.api.Controllers
     [Route("api/tenant/{companyId:int}/sales")]
     public class TenantSalesTransactionsController : ControllerBase
     {
+        // Loyalty earning rule: PHP 10 of FinalAmount = 1 point (rounded down), max 100 points per sale.
+        private const decimal LoyaltyAmountPerPoint = 10m;
+        private const int MaxPointsEarnedPerSale = 100;
+
         private readonly ITenantDbContextFactory _tenantFactory;
 
         public TenantSalesTransactionsController(ITenantDbContextFactory tenantFactory)
@@ -17,12 +21,18 @@ namespace freshcrumbs.CRM.api.Controllers
         }
 
         [HttpGet]
-        public async Task<IActionResult> GetSalesTransactions(int companyId)
+        public async Task<IActionResult> GetSalesTransactions(int companyId, bool includeDeleted = false)
         {
             await using var tenantDb = await _tenantFactory.CreateAsync(companyId);
 
-            var transactions = await tenantDb.SalesTransactions
-                .AsNoTracking()
+            var query = tenantDb.SalesTransactions.AsNoTracking();
+
+            if (!includeDeleted)
+            {
+                query = query.Where(x => !x.IsDeleted);
+            }
+
+            var transactions = await query
                 .OrderBy(x => x.TransactionId)
                 .ToListAsync();
 
@@ -45,6 +55,7 @@ namespace freshcrumbs.CRM.api.Controllers
                     x.TransactionDate,
                     x.TotalAmount,
                     x.DiscountAmount,
+                    x.CustomerDiscountAmount,
                     x.PointsUsed,
                     x.PointsEarned,
                     x.FinalAmount,
@@ -82,13 +93,12 @@ namespace freshcrumbs.CRM.api.Controllers
                 return BadRequest($"CustomerId {transaction.CustomerId} does not exist for this tenant.");
             }
 
-            // New transactions can only be created for an Active customer.
-            // Historical transactions already on file for a since-deactivated
-            // customer are untouched by this check.
             if (!string.Equals(customer.Status, "Active", StringComparison.OrdinalIgnoreCase))
             {
                 return BadRequest($"Customer \"{customer.FirstName} {customer.LastName}\" is inactive and cannot make new purchases.");
             }
+
+            Promotion? appliedPromotion = null;
 
             if (transaction.PromotionId.HasValue)
             {
@@ -106,9 +116,12 @@ namespace freshcrumbs.CRM.api.Controllers
                     return BadRequest(promotionError);
                 }
 
-                // Points-based promotions are gated on the customer's current
-                // balance, and PointsUsed is always server-derived from the
-                // promotion — a client-supplied PointsUsed is never trusted.
+                string? eligibilityError = await ValidateEligibilityAsync(tenantDb, promotion, customer.CustomerId);
+                if (eligibilityError != null)
+                {
+                    return BadRequest(eligibilityError);
+                }
+
                 if (promotion.RequiredLoyaltyPoints > 0)
                 {
                     if (customer.LoyaltyPoints < promotion.RequiredLoyaltyPoints)
@@ -126,6 +139,7 @@ namespace freshcrumbs.CRM.api.Controllers
                 }
 
                 transaction.DiscountAmount = ComputeDiscount(transaction.TotalAmount, promotion, transaction.TransactionDate);
+                appliedPromotion = promotion;
             }
             else
             {
@@ -133,11 +147,17 @@ namespace freshcrumbs.CRM.api.Controllers
                 transaction.DiscountAmount = 0;
             }
 
-            transaction.FinalAmount = transaction.TotalAmount - transaction.DiscountAmount;
+            transaction.CustomerDiscountAmount = await ComputeCustomerDiscountAsync(
+                tenantDb,
+                customer.CustomerId,
+                transaction.TotalAmount - transaction.DiscountAmount,
+                appliedPromotion);
 
-            // New transactions are always Completed; staff never choose the
-            // status at creation time (Cancelled only applies to an existing
-            // transaction through the update/cancellation flow below).
+            transaction.FinalAmount = transaction.TotalAmount - transaction.DiscountAmount - transaction.CustomerDiscountAmount;
+
+            // Never trust a client-supplied value.
+            transaction.PointsEarned = CalculatePointsEarned(transaction.FinalAmount);
+
             transaction.Status = "Completed";
 
             tenantDb.SalesTransactions.Add(transaction);
@@ -192,18 +212,12 @@ namespace freshcrumbs.CRM.api.Controllers
                 string.Equals(updated.Status, "Cancelled", StringComparison.OrdinalIgnoreCase) &&
                 !isAlreadyCancelled;
 
-            // ----- Cancellation branch -----
             if (isBeingCancelledNow)
             {
-                // Guard checked BEFORE any mutation. Nothing below this point
-                // runs more than once for the same transaction, so inventory
-                // and loyalty points can never be reversed twice.
                 if (isAlreadyCancelled)
                 {
                     return Conflict("This transaction is already cancelled and cannot be modified further.");
                 }
-
-                // 1. Restore inventory for every item this sale consumed.
                 var items = await tenantDb.TransactionItems
                     .Where(x => x.TransactionId == id)
                     .ToListAsync();
@@ -219,14 +233,9 @@ namespace freshcrumbs.CRM.api.Controllers
                     }
                 }
 
-                // 2. Reverse whatever loyalty effect the original sale had.
-                // Works identically whether PointsEarned/PointsUsed are 0 or not.
                 int originalDelta = transaction.PointsEarned - transaction.PointsUsed;
                 customer.LoyaltyPoints -= originalDelta;
 
-                // 3. Record the reversal for audit history, but only when the
-                // original sale actually had a loyalty effect to reverse. The
-                // original "Sale" LoyaltyTransaction record is left untouched.
                 if (transaction.PointsEarned != 0 || transaction.PointsUsed != 0)
                 {
                     tenantDb.LoyaltyTransactions.Add(new LoyaltyTransaction
@@ -240,9 +249,6 @@ namespace freshcrumbs.CRM.api.Controllers
                     });
                 }
 
-                // 4. Cancellation only ever changes Status. It must not touch
-                // PromotionId, TotalAmount, PaymentMethod, etc. — that would be
-                // indistinguishable from creating another normal completed sale.
                 transaction.Status = "Cancelled";
 
                 await tenantDb.SaveChangesAsync();
@@ -250,16 +256,13 @@ namespace freshcrumbs.CRM.api.Controllers
                 return Ok(ToFlatResponse(transaction));
             }
 
-            // ----- Normal update branch -----
-
-            // A cancelled transaction is a closed historical record. The only
-            // way back is not supported — cancellation is a one-way correction.
             if (isAlreadyCancelled)
             {
                 return Conflict("This transaction is already cancelled and cannot be modified further.");
             }
 
             decimal discountAmount = 0;
+            Promotion? appliedPromotion = null;
 
             if (updated.PromotionId.HasValue)
             {
@@ -277,14 +280,14 @@ namespace freshcrumbs.CRM.api.Controllers
                     return BadRequest(promotionError);
                 }
 
-                // Same server-controlled PointsUsed rule as Create: a client
-                // cannot attach a points-based promotion to an existing
-                // transaction and supply its own PointsUsed value.
+                string? eligibilityError = await ValidateEligibilityAsync(tenantDb, promotion, customer.CustomerId);
+                if (eligibilityError != null)
+                {
+                    return BadRequest(eligibilityError);
+                }
+
                 if (promotion.RequiredLoyaltyPoints > 0)
                 {
-                    // The points this transaction already has reserved are
-                    // still spendable by it (CustomerId cannot change via
-                    // update, so this is always the same customer).
                     int availablePoints = customer.LoyaltyPoints + transaction.PointsUsed;
 
                     if (availablePoints < promotion.RequiredLoyaltyPoints)
@@ -302,11 +305,26 @@ namespace freshcrumbs.CRM.api.Controllers
                 }
 
                 discountAmount = ComputeDiscount(updated.TotalAmount, promotion, updated.TransactionDate);
+                appliedPromotion = promotion;
             }
             else
             {
                 updated.PointsUsed = 0;
             }
+
+            decimal customerDiscountAmount =
+                updated.PromotionId == transaction.PromotionId && updated.TotalAmount == transaction.TotalAmount
+                    ? Math.Min(transaction.CustomerDiscountAmount, Math.Max(updated.TotalAmount - discountAmount, 0m))
+                    : await ComputeCustomerDiscountAsync(
+                        tenantDb,
+                        customer.CustomerId,
+                        updated.TotalAmount - discountAmount,
+                        appliedPromotion);
+
+            decimal finalAmount = updated.TotalAmount - discountAmount - customerDiscountAmount;
+
+            // Never trust a client-supplied value.
+            updated.PointsEarned = CalculatePointsEarned(finalAmount);
 
             int oldDelta = transaction.PointsEarned - transaction.PointsUsed;
             int newDelta = updated.PointsEarned - updated.PointsUsed;
@@ -338,9 +356,10 @@ namespace freshcrumbs.CRM.api.Controllers
             transaction.TransactionDate = updated.TransactionDate;
             transaction.TotalAmount = updated.TotalAmount;
             transaction.DiscountAmount = discountAmount;
+            transaction.CustomerDiscountAmount = customerDiscountAmount;
             transaction.PointsUsed = updated.PointsUsed;
             transaction.PointsEarned = updated.PointsEarned;
-            transaction.FinalAmount = updated.TotalAmount - discountAmount;
+            transaction.FinalAmount = finalAmount;
             transaction.PaymentMethod = updated.PaymentMethod;
             transaction.Status = updated.Status;
 
@@ -349,9 +368,97 @@ namespace freshcrumbs.CRM.api.Controllers
             return Ok(ToFlatResponse(transaction));
         }
 
-        // Sales Transactions are historical records and are never hard-deleted.
-        // Cancellation (PUT with Status = "Cancelled") is the only correction
-        // mechanism, so the DELETE endpoint has been removed.
+        [HttpDelete("{id:int}")]
+        public async Task<IActionResult> DeleteSalesTransaction(int companyId, int id)
+        {
+            await using var tenantDb = await _tenantFactory.CreateAsync(companyId);
+
+            var transaction = await tenantDb.SalesTransactions
+                .FirstOrDefaultAsync(x => x.TransactionId == id);
+
+            if (transaction == null)
+            {
+                return NotFound($"SalesTransaction with id {id} not found.");
+            }
+
+            if (string.Equals(transaction.Status, "Completed", StringComparison.OrdinalIgnoreCase))
+            {
+                return Conflict("A completed transaction cannot be deleted. Cancel it first so its stock and loyalty points are restored.");
+            }
+
+            transaction.IsDeleted = true;
+            await tenantDb.SaveChangesAsync();
+
+            return NoContent();
+        }
+
+        private static async Task<string?> ValidateEligibilityAsync(
+            freshcrumbs.CRM.infrastructure.data.TenantCrmDbContext tenantDb,
+            Promotion promotion,
+            int customerId)
+        {
+            if (string.IsNullOrWhiteSpace(promotion.EligibilityCategory))
+            {
+                return null;
+            }
+
+            bool isVerifiedForCategory = await tenantDb.CustomerDiscountEligibilities.AnyAsync(x =>
+                x.CustomerId == customerId &&
+                x.Category == promotion.EligibilityCategory &&
+                x.VerificationStatus == "Verified");
+
+            if (!isVerifiedForCategory)
+            {
+                return $"Promotion \"{promotion.PromotionName}\" requires verified {promotion.EligibilityCategory} eligibility for this customer.";
+            }
+
+            return null;
+        }
+
+        private static async Task<decimal> ComputeCustomerDiscountAsync(
+            freshcrumbs.CRM.infrastructure.data.TenantCrmDbContext tenantDb,
+            int customerId,
+            decimal amountAfterPromotion,
+            Promotion? appliedPromotion)
+        {
+            if (amountAfterPromotion <= 0)
+            {
+                return 0;
+            }
+
+            if (appliedPromotion != null && !string.IsNullOrWhiteSpace(appliedPromotion.EligibilityCategory))
+            {
+                return 0;
+            }
+
+            var verifiedCategories = await tenantDb.CustomerDiscountEligibilities
+                .AsNoTracking()
+                .Where(x => x.CustomerId == customerId && x.VerificationStatus == "Verified")
+                .Select(x => x.Category)
+                .ToListAsync();
+
+            decimal rate = verifiedCategories
+                .Select(GetCustomerDiscountRate)
+                .DefaultIfEmpty(0m)
+                .Max();
+
+            if (rate <= 0)
+            {
+                return 0;
+            }
+
+            return Math.Round(amountAfterPromotion * rate, 2, MidpointRounding.AwayFromZero);
+        }
+
+        private static decimal GetCustomerDiscountRate(string category)
+        {
+            return category switch
+            {
+                "Senior Citizen" => 0.20m,
+                "PWD" => 0.20m,
+                _ => 0m
+            };
+        }
 
         private static string? ValidatePromotion(Promotion promotion, DateTime transactionDate, decimal totalAmount)
         {
@@ -371,6 +478,17 @@ namespace freshcrumbs.CRM.api.Controllers
             }
 
             return null;
+        }
+
+        private static int CalculatePointsEarned(decimal finalAmount)
+        {
+            if (finalAmount <= 0m)
+            {
+                return 0;
+            }
+
+            decimal points = Math.Floor(finalAmount / LoyaltyAmountPerPoint);
+            return (int)Math.Min(points, MaxPointsEarnedPerSale);
         }
 
         private static decimal ComputeDiscount(decimal totalAmount, Promotion promotion, DateTime transactionDate)
@@ -412,6 +530,7 @@ namespace freshcrumbs.CRM.api.Controllers
                 transaction.TransactionDate,
                 transaction.TotalAmount,
                 transaction.DiscountAmount,
+                transaction.CustomerDiscountAmount,
                 transaction.PointsUsed,
                 transaction.PointsEarned,
                 transaction.FinalAmount,

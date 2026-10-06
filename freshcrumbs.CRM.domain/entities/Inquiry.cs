@@ -8,6 +8,10 @@ namespace freshcrumbs.CRM.domain.entities
 
         public int CustomerId { get; set; }
 
+        public string Type { get; set; } = string.Empty;
+
+        public string Source { get; set; } = string.Empty;
+
         public string Subject { get; set; } = string.Empty;
 
         public string Message { get; set; } = string.Empty;
@@ -21,6 +25,8 @@ namespace freshcrumbs.CRM.domain.entities
         public string RespondedBy { get; set; } = string.Empty;
 
         public DateTime? RespondedAt { get; set; }
+
+        public bool IsDeleted { get; set; } = false;
 
         public Customer? Customer { get; set; }
     }

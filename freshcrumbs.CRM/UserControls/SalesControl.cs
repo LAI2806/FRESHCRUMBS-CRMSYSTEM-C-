@@ -16,17 +16,27 @@ namespace freshcrumbs.CRM.winforms.UserControls
         private static readonly Color PageBg = Color.FromArgb(244, 244, 246);
         private static readonly Color HeaderRowColor = Color.FromArgb(250, 246, 242);
 
+        private const int PageSize = 50;
+
         private DataGridView _salesGrid = null!;
         private TextBox _searchBox = null!;
         private Button _addButton = null!;
         private Button _editButton = null!;
         private Button _itemsButton = null!;
+
+        private Button _deleteButton = null!;
         private Label _statusLabel = null!;
+        private Panel _pagerPanel = null!;
+        private Label _pageInfoLabel = null!;
+        private Button _prevPageButton = null!;
+        private Button _nextPageButton = null!;
 
         private List<SalesTransactionModel> _transactions = new();
         private List<CustomerModel> _customers = new();
         private List<PromotionModel> _promotions = new();
         private List<ProductModel> _products = new();
+        private List<SalesDisplayRow> _filteredTransactions = new();
+        private int _currentPage = 1;
 
         public SalesControl(int companyId)
         {
@@ -73,7 +83,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
                 Height = 34,
                 Font = new Font("Segoe UI", 10),
                 BorderStyle = BorderStyle.FixedSingle,
-                PlaceholderText = "Search by customer or payment method..."
+                PlaceholderText = "Search code, customer, or payment..."
             };
             _searchBox.TextChanged += SearchBox_TextChanged;
             toolbarPanel.Controls.Add(_searchBox);
@@ -98,6 +108,16 @@ namespace freshcrumbs.CRM.winforms.UserControls
             _itemsButton.Enabled = false;
             _itemsButton.Click += ItemsButton_Click;
             toolbarPanel.Controls.Add(_itemsButton);
+
+            _deleteButton = CreateActionButton("Delete", Color.White, Color.Firebrick, 90);
+            _deleteButton.FlatAppearance.BorderSize = 1;
+            _deleteButton.FlatAppearance.BorderColor = Color.Firebrick;
+            _deleteButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            _deleteButton.Enabled = false;
+            _deleteButton.Click += DeleteButton_Click;
+            toolbarPanel.Controls.Add(_deleteButton);
+
+            toolbarPanel.Resize += (s, e) => PositionToolbarButtons(toolbarPanel);
 
 
             toolbarPanel.Resize += (s, e) => PositionToolbarButtons(toolbarPanel);
@@ -146,6 +166,9 @@ namespace freshcrumbs.CRM.winforms.UserControls
             gridContainer.Controls.Add(_salesGrid);
             rootLayout.Controls.Add(gridContainer, 0, 2);
 
+            _pagerPanel = CreatePagerPanel();
+            gridContainer.Controls.Add(_pagerPanel);
+
             _statusLabel = new Label
             {
                 Text = "",
@@ -165,6 +188,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
             _addButton.Location = new Point(toolbarPanel.Width - _addButton.Width, 8);
             _editButton.Location = new Point(_addButton.Left - _editButton.Width - 10, 8);
             _itemsButton.Location = new Point(_editButton.Left - _itemsButton.Width - 10, 8);
+            _deleteButton.Location = new Point(_itemsButton.Left - _deleteButton.Width - 10, 8);
         }
 
         private Button CreateActionButton(string text, Color backColor, Color foreColor, int width)
@@ -184,6 +208,105 @@ namespace freshcrumbs.CRM.winforms.UserControls
             return button;
         }
 
+        private Panel CreatePagerPanel()
+        {
+            var panel = new Panel
+            {
+                Dock = DockStyle.Bottom,
+                Height = 40
+            };
+
+            _pageInfoLabel = new Label
+            {
+                AutoSize = true,
+                Font = new Font("Segoe UI", 9.5f),
+                ForeColor = LabelGray,
+                Location = new Point(0, 11),
+                Text = "Page 1 of 1"
+            };
+            panel.Controls.Add(_pageInfoLabel);
+
+            _nextPageButton = new Button
+            {
+                Text = "Next \u203A",
+                Width = 90,
+                Height = 30,
+                Font = new Font("Segoe UI", 9.5f),
+                BackColor = Color.White,
+                ForeColor = LabelGray,
+                FlatStyle = FlatStyle.Flat,
+                Cursor = Cursors.Hand,
+                Enabled = false
+            };
+            _nextPageButton.FlatAppearance.BorderSize = 1;
+            _nextPageButton.FlatAppearance.BorderColor = BorderColor;
+            _nextPageButton.Click += (s, e) => ChangePage(1);
+            panel.Controls.Add(_nextPageButton);
+
+            _prevPageButton = new Button
+            {
+                Text = "\u2039 Previous",
+                Width = 90,
+                Height = 30,
+                Font = new Font("Segoe UI", 9.5f),
+                BackColor = Color.White,
+                ForeColor = LabelGray,
+                FlatStyle = FlatStyle.Flat,
+                Cursor = Cursors.Hand,
+                Enabled = false
+            };
+            _prevPageButton.FlatAppearance.BorderSize = 1;
+            _prevPageButton.FlatAppearance.BorderColor = BorderColor;
+            _prevPageButton.Click += (s, e) => ChangePage(-1);
+            panel.Controls.Add(_prevPageButton);
+
+            panel.Resize += (s, e) => PositionPagerButtons(panel);
+            PositionPagerButtons(panel);
+
+            return panel;
+        }
+
+        private void PositionPagerButtons(Panel pagerPanel)
+        {
+            _nextPageButton.Location = new Point(pagerPanel.Width - _nextPageButton.Width, 5);
+            _prevPageButton.Location = new Point(_nextPageButton.Left - _prevPageButton.Width - 10, 5);
+        }
+
+        private void ChangePage(int delta)
+        {
+            _currentPage += delta;
+            RenderCurrentPage();
+        }
+
+        private void RenderCurrentPage()
+        {
+            int totalRecords = _filteredTransactions.Count;
+            int totalPages = totalRecords == 0 ? 1 : (int)Math.Ceiling(totalRecords / (double)PageSize);
+
+            if (_currentPage > totalPages)
+            {
+                _currentPage = totalPages;
+            }
+            if (_currentPage < 1)
+            {
+                _currentPage = 1;
+            }
+
+            var pageItems = _filteredTransactions
+                .Skip((_currentPage - 1) * PageSize)
+                .Take(PageSize)
+                .ToList();
+
+            BindGrid(pageItems);
+
+            _pageInfoLabel.Text = totalRecords == 0
+                ? "No records"
+                : $"Page {_currentPage} of {totalPages} ({totalRecords} {(totalRecords == 1 ? "record" : "records")})";
+
+            _prevPageButton.Enabled = _currentPage > 1;
+            _nextPageButton.Enabled = _currentPage < totalPages;
+        }
+
         private async void SalesControl_Load(object? sender, EventArgs e)
         {
             await LoadDataAsync();
@@ -194,11 +317,19 @@ namespace freshcrumbs.CRM.winforms.UserControls
             try
             {
                 _statusLabel.Text = "";
-                _customers = await _apiService.GetCustomersAsync(_companyId);
-                _promotions = await _apiService.GetPromotionsAsync(_companyId);
+                // Include inactive customers so older transactions still show their Customer Code and name.
+                _customers = await _apiService.GetCustomersAsync(_companyId, includeInactive: true);
+                try
+                {
+                    _promotions = await _apiService.GetPromotionsAsync(_companyId);
+                }
+                catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.Forbidden)
+                {
+                    _promotions = new List<PromotionModel>();
+                }
                 _products = await _apiService.GetProductsAsync(_companyId);
                 _transactions = await _apiService.GetSalesTransactionsAsync(_companyId);
-                BindGrid();
+                ApplyFilters();
             }
             catch (Exception ex)
             {
@@ -206,29 +337,57 @@ namespace freshcrumbs.CRM.winforms.UserControls
             }
         }
 
-        private void BindGrid()
+        private class SalesDisplayRow
+        {
+            public int TransactionId { get; set; }
+            public string CustomerCode { get; set; } = string.Empty;
+            public string CustomerName { get; set; } = string.Empty;
+            public string PromotionName { get; set; } = string.Empty;
+            public DateTime TransactionDate { get; set; }
+            public decimal TotalAmount { get; set; }
+            public decimal DiscountAmount { get; set; }
+            public decimal CustomerDiscountAmount { get; set; }
+            public decimal FinalAmount { get; set; }
+            public string PaymentMethod { get; set; } = string.Empty;
+            public string Status { get; set; } = string.Empty;
+        }
+
+        private void ApplyFilters(bool resetPage = true)
         {
             string term = _searchBox?.Text.Trim().ToLowerInvariant() ?? "";
 
-            var displayRows = _transactions
-                .Select(t => new
+            _filteredTransactions = _transactions
+                .Select(t => new SalesDisplayRow
                 {
-                    t.TransactionId,
+                    TransactionId = t.TransactionId,
+                    CustomerCode = GetCustomerCode(t.CustomerId),
                     CustomerName = GetCustomerName(t.CustomerId),
                     PromotionName = t.PromotionId.HasValue ? GetPromotionName(t.PromotionId.Value) : "None",
-                    t.TransactionDate,
-                    t.TotalAmount,
-                    t.DiscountAmount,
-                    t.FinalAmount,
-                    t.PaymentMethod,
-                    t.Status
+                    TransactionDate = t.TransactionDate,
+                    TotalAmount = t.TotalAmount,
+                    DiscountAmount = t.DiscountAmount,
+                    CustomerDiscountAmount = t.CustomerDiscountAmount,
+                    FinalAmount = t.FinalAmount,
+                    PaymentMethod = t.PaymentMethod,
+                    Status = t.Status
                 })
                 .Where(row =>
                     string.IsNullOrEmpty(term) ||
+                    row.CustomerCode.ToLowerInvariant().Contains(term) ||
                     row.CustomerName.ToLowerInvariant().Contains(term) ||
                     row.PaymentMethod.ToLowerInvariant().Contains(term))
                 .ToList();
 
+            if (resetPage)
+            {
+                _currentPage = 1;
+            }
+
+            RenderCurrentPage();
+        }
+
+        private void BindGrid(List<SalesDisplayRow> displayRows)
+        {
             _salesGrid.AutoGenerateColumns = true;
             _salesGrid.DataSource = null;
             _salesGrid.DataSource = displayRows;
@@ -238,11 +397,13 @@ namespace freshcrumbs.CRM.winforms.UserControls
                 _salesGrid.Columns["TransactionId"].Visible = false;
             }
 
-            SetColumnHeader("CustomerName", "Customer");
+            SetColumnHeader("CustomerCode", "Customer Code");
+            SetColumnHeader("CustomerName", "Customer Name");
             SetColumnHeader("PromotionName", "Promotion");
             SetColumnHeader("TransactionDate", "Date");
             SetColumnHeader("TotalAmount", "Total");
-            SetColumnHeader("DiscountAmount", "Discount");
+            SetColumnHeader("DiscountAmount", "Promotion Discount");
+            SetColumnHeader("CustomerDiscountAmount", "Customer Discount");
             SetColumnHeader("FinalAmount", "Final Amount");
             SetColumnHeader("PaymentMethod", "Payment");
             SetColumnHeader("Status", "Status");
@@ -251,6 +412,12 @@ namespace freshcrumbs.CRM.winforms.UserControls
             {
                 _salesGrid.Columns["TransactionDate"].DefaultCellStyle.Format = "MM/dd/yyyy";
             }
+        }
+
+        private string GetCustomerCode(int customerId)
+        {
+            var customer = _customers.FirstOrDefault(c => c.CustomerId == customerId);
+            return customer != null ? customer.CustomerCode : string.Empty;
         }
 
         private string GetCustomerName(int customerId)
@@ -275,7 +442,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
 
         private void SearchBox_TextChanged(object? sender, EventArgs e)
         {
-            BindGrid();
+            ApplyFilters();
         }
 
         private void SalesGrid_SelectionChanged(object? sender, EventArgs e)
@@ -283,6 +450,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
             bool hasSelection = _salesGrid.SelectedRows.Count > 0;
             _editButton.Enabled = hasSelection;
             _itemsButton.Enabled = hasSelection;
+            _deleteButton.Enabled = hasSelection;
         }
 
         private SalesTransactionModel? GetSelectedTransaction()
@@ -365,5 +533,46 @@ namespace freshcrumbs.CRM.winforms.UserControls
             dialog.ShowDialog(this);
         }
 
+        private async void DeleteButton_Click(object? sender, EventArgs e)
+        {
+            var selectedTransaction = GetSelectedTransaction();
+            if (selectedTransaction == null)
+            {
+                return;
+            }
+
+            if (string.Equals(selectedTransaction.Status, "Completed", StringComparison.OrdinalIgnoreCase))
+            {
+                MessageBox.Show(
+                    "A completed transaction cannot be deleted. Cancel it first so its stock and loyalty points are restored.",
+                    "Delete Not Allowed",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return;
+            }
+
+            var confirm = MessageBox.Show(
+                "Are you sure you want to delete this transaction? It will be hidden from the list but the record will be kept.",
+                "Confirm Delete",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+
+            if (confirm != DialogResult.Yes)
+            {
+                return;
+            }
+
+            try
+            {
+                await _apiService.DeleteSalesTransactionAsync(_companyId, selectedTransaction.TransactionId);
+                await LoadDataAsync();
+                _statusLabel.Text = "";
+            }
+            catch (Exception ex)
+            {
+                _statusLabel.Text = $"Failed to delete transaction: {ex.Message}";
+            }
         }
+
     }
+}

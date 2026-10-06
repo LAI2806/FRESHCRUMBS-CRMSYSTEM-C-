@@ -17,12 +17,18 @@ namespace freshcrumbs.CRM.api.Controllers
         }
 
         [HttpGet]
-        public async Task<IActionResult> GetLoyaltyTransactions(int companyId)
+        public async Task<IActionResult> GetLoyaltyTransactions(int companyId, bool includeDeleted = false)
         {
             await using var tenantDb = await _tenantFactory.CreateAsync(companyId);
 
-            var transactions = await tenantDb.LoyaltyTransactions
-                .AsNoTracking()
+            var query = tenantDb.LoyaltyTransactions.AsNoTracking();
+
+            if (!includeDeleted)
+            {
+                query = query.Where(x => !x.IsDeleted);
+            }
+
+            var transactions = await query
                 .OrderBy(x => x.LoyaltyTransactionId)
                 .ToListAsync();
 
@@ -118,6 +124,11 @@ namespace freshcrumbs.CRM.api.Controllers
                 return NotFound($"LoyaltyTransaction with id {id} not found.");
             }
 
+            if (transaction.IsDeleted)
+            {
+                return Conflict("This loyalty transaction has already been deleted.");
+            }
+
             var customer = await tenantDb.Customers
                 .FirstOrDefaultAsync(x => x.CustomerId == transaction.CustomerId);
 
@@ -126,7 +137,7 @@ namespace freshcrumbs.CRM.api.Controllers
                 customer.LoyaltyPoints -= (transaction.PointsEarned - transaction.PointsUsed);
             }
 
-            tenantDb.LoyaltyTransactions.Remove(transaction);
+            transaction.IsDeleted = true;
             await tenantDb.SaveChangesAsync();
 
             return NoContent();

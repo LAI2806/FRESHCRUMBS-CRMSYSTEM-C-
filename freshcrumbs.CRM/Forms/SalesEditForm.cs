@@ -22,7 +22,15 @@ namespace freshcrumbs.CRM.winforms.Forms
         private static readonly Color HeaderRowColor = Color.FromArgb(250, 246, 242);
         private static readonly System.Globalization.CultureInfo PesoCulture = new System.Globalization.CultureInfo("en-PH");
 
-        private ComboBox _customerBox = null!;
+        // Loyalty earning rule (must match the API): PHP 10 of Final Amount = 1 point,
+        // rounded down, max 100 points per sale. The API recalculates it on save.
+        private const decimal LoyaltyAmountPerPoint = 10m;
+        private const int MaxPointsEarnedPerSale = 100;
+
+        private TextBox _customerCodeBox = null!;
+        private TextBox _customerNameBox = null!;
+        private Label _customerLookupLabel = null!;
+        private CustomerModel? _selectedCustomer;
         private DateTimePicker _datePicker = null!;
         private DataGridView _itemsGrid = null!;
         private Button _addItemButton = null!;
@@ -32,6 +40,9 @@ namespace freshcrumbs.CRM.winforms.Forms
         private Label _discountLabel = null!;
         private Label _promotionMessageLabel = null!;
         private Label _finalAmountLabel = null!;
+        private Label _customerDiscountLabel = null!;
+        private Label _totalDiscountLabel = null!;
+        private Label _customerDiscountMessageLabel = null!;
         private NumericUpDown _pointsUsedBox = null!;
         private NumericUpDown _pointsEarnedBox = null!;
         private ComboBox _paymentMethodBox = null!;
@@ -59,6 +70,7 @@ namespace freshcrumbs.CRM.winforms.Forms
                     TransactionDate = existingTransaction.TransactionDate,
                     TotalAmount = existingTransaction.TotalAmount,
                     DiscountAmount = existingTransaction.DiscountAmount,
+                    CustomerDiscountAmount = existingTransaction.CustomerDiscountAmount,
                     PointsUsed = existingTransaction.PointsUsed,
                     PointsEarned = existingTransaction.PointsEarned,
                     FinalAmount = existingTransaction.FinalAmount,
@@ -66,7 +78,13 @@ namespace freshcrumbs.CRM.winforms.Forms
                     Status = existingTransaction.Status
                 };
 
-                _customerBox.SelectedValue = Result.CustomerId;
+                // The customer is locked in edit mode: the update endpoint never changes a
+                // transaction's CustomerId, so the existing customer is shown read-only.
+                var existingCustomer = _customers.FirstOrDefault(c => c.CustomerId == Result.CustomerId);
+                _customerCodeBox.Text = existingCustomer?.CustomerCode ?? string.Empty;
+                _customerCodeBox.ReadOnly = true;
+                _customerCodeBox.TabStop = false;
+                _customerCodeBox.BackColor = HeaderRowColor;
                 _datePicker.Value = Result.TransactionDate;
                 _promotionBox.SelectedValue = Result.PromotionId ?? 0;
                 _pointsUsedBox.Value = Result.PointsUsed;
@@ -125,20 +143,45 @@ namespace freshcrumbs.CRM.winforms.Forms
             };
             root.Controls.Add(titleLabel);
 
-            AddSectionLabel(root, "CUSTOMER");
-            _customerBox = new ComboBox
+            AddSectionLabel(root, "CUSTOMER CODE");
+            _customerCodeBox = new TextBox
             {
                 Width = 540,
                 Height = 34,
                 Font = new Font("Segoe UI", 10.5f),
-                DropDownStyle = ComboBoxStyle.DropDownList,
-                FlatStyle = FlatStyle.Flat,
-                Margin = new Padding(0, 0, 0, 14),
-                DataSource = _customers,
-                DisplayMember = "FirstName",
-                ValueMember = "CustomerId"
+                BorderStyle = BorderStyle.FixedSingle,
+                PlaceholderText = "Enter Customer Code (e.g. CUST-001)",
+                Margin = new Padding(0, 0, 0, 14)
             };
-            root.Controls.Add(_customerBox);
+            root.Controls.Add(_customerCodeBox);
+
+            AddSectionLabel(root, "CUSTOMER NAME");
+            _customerNameBox = new TextBox
+            {
+                Width = 540,
+                Height = 34,
+                Font = new Font("Segoe UI", 10.5f),
+                BorderStyle = BorderStyle.FixedSingle,
+                ReadOnly = true,
+                TabStop = false,
+                BackColor = HeaderRowColor,
+                ForeColor = TextDark,
+                PlaceholderText = "Filled in automatically from the Customer Code",
+                Margin = new Padding(0, 0, 0, 2)
+            };
+            root.Controls.Add(_customerNameBox);
+
+            _customerLookupLabel = new Label
+            {
+                Text = "",
+                Font = new Font("Segoe UI", 9, FontStyle.Italic),
+                ForeColor = Color.Firebrick,
+                AutoSize = false,
+                Width = 540,
+                Height = 20,
+                Margin = new Padding(0, 0, 0, 10)
+            };
+            root.Controls.Add(_customerLookupLabel);
 
             AddSectionLabel(root, "TRANSACTION DATE");
             _datePicker = new DateTimePicker
@@ -149,6 +192,9 @@ namespace freshcrumbs.CRM.winforms.Forms
                 Format = DateTimePickerFormat.Short,
                 Margin = new Padding(0, 0, 0, 14)
             };
+            // The date decides whether a promotion is valid, which changes Final Amount
+            // and therefore Points Earned.
+            _datePicker.ValueChanged += (s, e) => RecalculateDiscount(GetEffectiveTotal());
             root.Controls.Add(_datePicker);
 
             if (!_isEditMode)
@@ -220,17 +266,6 @@ namespace freshcrumbs.CRM.winforms.Forms
                 root.Controls.Add(_itemsGrid);
             }
 
-            AddSectionLabel(root, "TOTAL AMOUNT");
-            _totalAmountLabel = new Label
-            {
-                Text = "₱0.00",
-                Font = new Font("Segoe UI", 14, FontStyle.Bold),
-                ForeColor = TextDark,
-                AutoSize = true,
-                Margin = new Padding(0, 0, 0, 14)
-            };
-            root.Controls.Add(_totalAmountLabel);
-
             AddSectionLabel(root, "PROMOTION (OPTIONAL)");
             var promotionOptions = new List<PromotionOption> { new PromotionOption { PromotionId = 0, PromotionName = "-- None --" } };
             promotionOptions.AddRange(_promotions.Select(p => new PromotionOption { PromotionId = p.PromotionId, PromotionName = p.PromotionName }));
@@ -252,8 +287,18 @@ namespace freshcrumbs.CRM.winforms.Forms
                 ApplyPointsRedemptionIfNeeded();
                 RecalculateDiscount(GetEffectiveTotal());
             };
-            _customerBox.SelectedIndexChanged += (s, e) =>
+            _customerCodeBox.TextChanged += (s, e) =>
             {
+                var previousCustomer = _selectedCustomer;
+                ResolveCustomerFromCode();
+
+                // Only a change in the resolved customer (the old SelectedIndexChanged
+                // equivalent) needs the balance and promotion re-evaluated.
+                if (ReferenceEquals(previousCustomer, _selectedCustomer))
+                {
+                    return;
+                }
+
                 // Switching customers changes the available balance, so the
                 // promotion has to be re-evaluated and redisplayed as well.
                 UpdateSelectedCustomerBalance();
@@ -272,27 +317,44 @@ namespace freshcrumbs.CRM.winforms.Forms
             };
             root.Controls.Add(_promotionMessageLabel);
 
-            AddSectionLabel(root, "DISCOUNT");
-            _discountLabel = new Label
+            _customerDiscountMessageLabel = new Label
             {
-                Text = "₱0.00",
-                Font = new Font("Segoe UI", 12, FontStyle.Bold),
-                ForeColor = Color.Firebrick,
+                Text = "",
+                Font = new Font("Segoe UI", 9, FontStyle.Italic),
+                ForeColor = Color.DarkOrange,
                 AutoSize = true,
-                Margin = new Padding(0, 0, 0, 14)
+                MaximumSize = new Size(540, 0),
+                Margin = new Padding(0, 0, 0, 10)
             };
-            root.Controls.Add(_discountLabel);
+            root.Controls.Add(_customerDiscountMessageLabel);
 
-            AddSectionLabel(root, "FINAL AMOUNT");
-            _finalAmountLabel = new Label
+            AddSectionLabel(root, "DISCOUNT BREAKDOWN");
+            var breakdownTable = new TableLayoutPanel
             {
-                Text = "₱0.00",
-                Font = new Font("Segoe UI", 16, FontStyle.Bold),
-                ForeColor = AccentColor,
+                ColumnCount = 2,
+                RowCount = 5,
+                Width = 540,
                 AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                BackColor = HeaderRowColor,
+                Padding = new Padding(14, 10, 14, 10),
                 Margin = new Padding(0, 0, 0, 14)
             };
-            root.Controls.Add(_finalAmountLabel);
+            breakdownTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            breakdownTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+
+            _totalAmountLabel = CreateBreakdownValueLabel(12, TextDark);
+            _customerDiscountLabel = CreateBreakdownValueLabel(12, Color.Firebrick);
+            _discountLabel = CreateBreakdownValueLabel(12, Color.Firebrick);
+            _totalDiscountLabel = CreateBreakdownValueLabel(12, Color.Firebrick);
+            _finalAmountLabel = CreateBreakdownValueLabel(16, AccentColor);
+
+            AddBreakdownRow(breakdownTable, 0, "Subtotal", _totalAmountLabel);
+            AddBreakdownRow(breakdownTable, 1, "Customer Discount", _customerDiscountLabel);
+            AddBreakdownRow(breakdownTable, 2, "Promotion Discount", _discountLabel);
+            AddBreakdownRow(breakdownTable, 3, "Total Discount", _totalDiscountLabel);
+            AddBreakdownRow(breakdownTable, 4, "Final Amount", _finalAmountLabel);
+            root.Controls.Add(breakdownTable);
 
             _pointsUsedBox = AddNumericField(root, "POINTS USED");
 
@@ -302,6 +364,11 @@ namespace freshcrumbs.CRM.winforms.Forms
             _pointsUsedBox.Enabled = false;
 
             _pointsEarnedBox = AddNumericField(root, "POINTS EARNED");
+
+            // Points Earned is always system-calculated from the Final Amount.
+            // Staff can never type or spin a value here.
+            _pointsEarnedBox.ReadOnly = true;
+            _pointsEarnedBox.Enabled = false;
 
             AddSectionLabel(root, "PAYMENT METHOD");
             _paymentMethodBox = new ComboBox
@@ -441,6 +508,34 @@ namespace freshcrumbs.CRM.winforms.Forms
             root.Controls.Add(label);
         }
 
+        private Label CreateBreakdownValueLabel(float fontSize, Color color)
+        {
+            return new Label
+            {
+                Text = "₱0.00",
+                Font = new Font("Segoe UI", fontSize, FontStyle.Bold),
+                ForeColor = color,
+                AutoSize = true,
+                Anchor = AnchorStyles.Right,
+                Margin = new Padding(0, 4, 0, 4)
+            };
+        }
+
+        private void AddBreakdownRow(TableLayoutPanel table, int row, string caption, Label valueLabel)
+        {
+            var captionLabel = new Label
+            {
+                Text = caption,
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                ForeColor = LabelGray,
+                AutoSize = true,
+                Anchor = AnchorStyles.Left,
+                Margin = new Padding(0, 4, 0, 4)
+            };
+            table.Controls.Add(captionLabel, 0, row);
+            table.Controls.Add(valueLabel, 1, row);
+        }
+
         private NumericUpDown AddNumericField(TableLayoutPanel root, string labelText)
         {
             AddSectionLabel(root, labelText);
@@ -489,79 +584,178 @@ namespace freshcrumbs.CRM.winforms.Forms
 
         private void RecalculateDiscount(decimal totalAmount)
         {
-            _totalAmountLabel.Text = totalAmount.ToString("C2", PesoCulture);
             _promotionMessageLabel.Text = "";
 
+            PromotionModel? appliedPromotion = null;
+            decimal promotionDiscount = 0m;
+
             int promotionId = (int)(_promotionBox.SelectedValue ?? 0);
+            var promotion = promotionId == 0 ? null : _promotions.FirstOrDefault(p => p.PromotionId == promotionId);
 
-            if (promotionId == 0)
+            if (promotion != null)
             {
-                _discountLabel.Text = "₱0.00";
-                _finalAmountLabel.Text = totalAmount.ToString("C2", PesoCulture);
+                if (!string.Equals(promotion.Status, "Active", StringComparison.OrdinalIgnoreCase))
+                {
+                    _promotionMessageLabel.Text = "This promotion is not active.";
+                }
+                else if (_datePicker.Value < promotion.StartDate || _datePicker.Value > promotion.EndDate)
+                {
+                    _promotionMessageLabel.Text = "This promotion is not valid for the selected date.";
+                }
+                else if (totalAmount < promotion.MinimumPurchase)
+                {
+                    _promotionMessageLabel.Text = $"Minimum purchase of {promotion.MinimumPurchase.ToString("C2", PesoCulture)} required.";
+                }
+                else if (!HasSufficientLoyaltyPoints(promotion))
+                {
+                    _promotionMessageLabel.Text =
+                        $"Customer does not have enough loyalty points. This promotion requires {promotion.RequiredLoyaltyPoints}, customer has {GetAvailableLoyaltyPoints()}.";
+                }
+                else
+                {
+                    decimal discount = string.Equals(promotion.DiscountType, "Percentage", StringComparison.OrdinalIgnoreCase)
+                        ? totalAmount * (promotion.DiscountValue / 100m)
+                        : promotion.DiscountValue;
+
+                    if (discount > totalAmount)
+                    {
+                        discount = totalAmount;
+                    }
+
+                    _promotionMessageLabel.Text = promotion.RequiredLoyaltyPoints > 0
+                        ? $"Promotion applied. {promotion.RequiredLoyaltyPoints} loyalty points will be used."
+                        : "Promotion applied.";
+
+                    appliedPromotion = promotion;
+                    promotionDiscount = discount;
+                }
+            }
+
+            decimal customerDiscount = CalculateCustomerDiscount(
+                totalAmount - promotionDiscount,
+                appliedPromotion,
+                out string customerDiscountMessage);
+
+            decimal totalDiscount = promotionDiscount + customerDiscount;
+
+            _totalAmountLabel.Text = totalAmount.ToString("C2", PesoCulture);
+            _customerDiscountLabel.Text = customerDiscount.ToString("C2", PesoCulture);
+            _discountLabel.Text = promotionDiscount.ToString("C2", PesoCulture);
+            _totalDiscountLabel.Text = totalDiscount.ToString("C2", PesoCulture);
+            _finalAmountLabel.Text = (totalAmount - totalDiscount).ToString("C2", PesoCulture);
+            _customerDiscountMessageLabel.Text = customerDiscountMessage;
+
+            _pointsEarnedBox.Value = CalculatePointsEarned(totalAmount - totalDiscount);
+        }
+
+        private static int CalculatePointsEarned(decimal finalAmount)
+        {
+            if (finalAmount <= 0m)
+            {
+                return 0;
+            }
+
+            decimal points = Math.Floor(finalAmount / LoyaltyAmountPerPoint);
+            return (int)Math.Min(points, MaxPointsEarnedPerSale);
+        }
+
+        private decimal CalculateCustomerDiscount(decimal amountAfterPromotion, PromotionModel? appliedPromotion, out string message)
+        {
+            message = "";
+
+            if (_isEditMode && (int)(_promotionBox.SelectedValue ?? 0) == (Result.PromotionId ?? 0))
+            {
+                message = Result.CustomerDiscountAmount > 0m
+                    ? "Customer discount from the original transaction is retained."
+                    : "";
+                return Math.Min(Result.CustomerDiscountAmount, Math.Max(amountAfterPromotion, 0m));
+            }
+
+            var customer = _isEditMode
+                ? _customers.FirstOrDefault(c => c.CustomerId == Result.CustomerId)
+                : _selectedCustomer;
+
+            if (customer == null)
+            {
+                return 0m;
+            }
+
+            var bestEligibility = (customer.DiscountEligibilities ?? new List<CustomerDiscountEligibilityModel>())
+                .Where(e => string.Equals(e.VerificationStatus, "Verified", StringComparison.OrdinalIgnoreCase))
+                .Select(e => new { e.Category, Rate = GetCustomerDiscountRate(e.Category) })
+                .Where(x => x.Rate > 0m)
+                .OrderByDescending(x => x.Rate)
+                .FirstOrDefault();
+
+            if (bestEligibility == null)
+            {
+                return 0m;
+            }
+
+            if (appliedPromotion != null && !string.IsNullOrWhiteSpace(appliedPromotion.EligibilityCategory))
+            {
+                message = $"{bestEligibility.Category} discount not applied: the selected promotion is already an eligibility discount.";
+                return 0m;
+            }
+
+            if (amountAfterPromotion <= 0m)
+            {
+                return 0m;
+            }
+
+            message = $"{bestEligibility.Category} (verified): {bestEligibility.Rate * 100m:0.##}% customer discount applied.";
+            return Math.Round(amountAfterPromotion * bestEligibility.Rate, 2, MidpointRounding.AwayFromZero);
+        }
+
+        private static decimal GetCustomerDiscountRate(string category)
+        {
+            return category switch
+            {
+                "Senior Citizen" => 0.20m,
+                "PWD" => 0.20m,
+                _ => 0m
+            };
+        }
+
+        private void ResolveCustomerFromCode()
+        {
+            string code = _customerCodeBox.Text.Trim();
+
+            _selectedCustomer = null;
+            _customerNameBox.Text = string.Empty;
+            _customerLookupLabel.Text = string.Empty;
+
+            if (code.Length == 0)
+            {
                 return;
             }
 
-            var promotion = _promotions.FirstOrDefault(p => p.PromotionId == promotionId);
+            // Lookup is by the existing CustomerCode only: trimmed and case-insensitive.
+            var customer = _customers.FirstOrDefault(c =>
+                string.Equals(c.CustomerCode.Trim(), code, StringComparison.OrdinalIgnoreCase));
 
-            if (promotion == null)
+            if (customer == null)
             {
-                _discountLabel.Text = "₱0.00";
-                _finalAmountLabel.Text = totalAmount.ToString("C2", PesoCulture);
+                _customerLookupLabel.Text = "Customer code not found.";
                 return;
             }
 
-            if (!string.Equals(promotion.Status, "Active", StringComparison.OrdinalIgnoreCase))
+            // New transactions can only be created for active customers (the API enforces
+            // this too). In edit mode the customer is locked, so an inactive customer is
+            // still displayed.
+            if (!_isEditMode && !string.Equals(customer.Status, "Active", StringComparison.OrdinalIgnoreCase))
             {
-                _promotionMessageLabel.Text = "This promotion is not active.";
-                _discountLabel.Text = "₱0.00";
-                _finalAmountLabel.Text = totalAmount.ToString("C2", PesoCulture);
+                _customerLookupLabel.Text = "This customer is inactive and cannot be selected.";
                 return;
             }
 
-            if (_datePicker.Value < promotion.StartDate || _datePicker.Value > promotion.EndDate)
-            {
-                _promotionMessageLabel.Text = "This promotion is not valid for the selected date.";
-                _discountLabel.Text = "₱0.00";
-                _finalAmountLabel.Text = totalAmount.ToString("C2", PesoCulture);
-                return;
-            }
-
-            if (totalAmount < promotion.MinimumPurchase)
-            {
-                _promotionMessageLabel.Text = $"Minimum purchase of {promotion.MinimumPurchase.ToString("C2", PesoCulture)} required.";
-                _discountLabel.Text = "₱0.00";
-                _finalAmountLabel.Text = totalAmount.ToString("C2", PesoCulture);
-                return;
-            }
-
-            if (!HasSufficientLoyaltyPoints(promotion))
-            {
-                _promotionMessageLabel.Text =
-                    $"Customer does not have enough loyalty points. This promotion requires {promotion.RequiredLoyaltyPoints}, customer has {GetAvailableLoyaltyPoints()}.";
-                _discountLabel.Text = "₱0.00";
-                _finalAmountLabel.Text = totalAmount.ToString("C2", PesoCulture);
-                return;
-            }
-
-            decimal discount = string.Equals(promotion.DiscountType, "Percentage", StringComparison.OrdinalIgnoreCase)
-                ? totalAmount * (promotion.DiscountValue / 100m)
-                : promotion.DiscountValue;
-
-            if (discount > totalAmount)
-            {
-                discount = totalAmount;
-            }
-
-            _promotionMessageLabel.Text = promotion.RequiredLoyaltyPoints > 0
-                ? $"Promotion applied. {promotion.RequiredLoyaltyPoints} loyalty points will be used."
-                : "Promotion applied.";
-            _discountLabel.Text = discount.ToString("C2", PesoCulture);
-            _finalAmountLabel.Text = (totalAmount - discount).ToString("C2", PesoCulture);
+            _selectedCustomer = customer;
+            _customerNameBox.Text = $"{customer.FirstName} {customer.LastName}";
         }
 
         private void UpdateSelectedCustomerBalance()
         {
-            if (_customerBox.SelectedItem is CustomerModel selectedCustomer)
+            if (_selectedCustomer is CustomerModel selectedCustomer)
             {
                 _selectedCustomerLoyaltyBalance = selectedCustomer.LoyaltyPoints;
             }
@@ -606,7 +800,7 @@ namespace freshcrumbs.CRM.winforms.Forms
             // still spendable by it. Without this, reopening and re-saving an
             // unchanged transaction would fail its own validation.
             if (_isEditMode &&
-                _customerBox.SelectedValue is int selectedCustomerId &&
+                _selectedCustomer?.CustomerId is int selectedCustomerId &&
                 selectedCustomerId == Result.CustomerId)
             {
                 available += Result.PointsUsed;
@@ -661,10 +855,18 @@ namespace freshcrumbs.CRM.winforms.Forms
         {
             _errorLabel.Text = "";
 
-            if (_customerBox.SelectedValue is not int customerId)
+            // In edit mode the customer is locked, so the existing CustomerId is kept.
+            int customerId = Result.CustomerId;
+
+            if (!_isEditMode)
             {
-                _errorLabel.Text = "Please select a customer.";
-                return;
+                if (_selectedCustomer == null)
+                {
+                    _errorLabel.Text = "Please enter a valid Customer Code.";
+                    return;
+                }
+
+                customerId = _selectedCustomer.CustomerId;
             }
 
             if (!_isEditMode && _items.Count == 0)
@@ -683,6 +885,7 @@ namespace freshcrumbs.CRM.winforms.Forms
             int promotionId = (int)(_promotionBox.SelectedValue ?? 0);
 
             decimal discountAmount = 0;
+            PromotionModel? appliedPromotion = null;
             var promotion = promotionId == 0 ? null : _promotions.FirstOrDefault(p => p.PromotionId == promotionId);
 
             // A points-based promotion cannot be saved onto a customer who cannot
@@ -710,19 +913,28 @@ namespace freshcrumbs.CRM.winforms.Forms
                 {
                     discountAmount = totalAmount;
                 }
+
+                appliedPromotion = promotion;
             }
+
+            decimal customerDiscountAmount = CalculateCustomerDiscount(
+                totalAmount - discountAmount,
+                appliedPromotion,
+                out _);
 
             Result.CustomerId = customerId;
             Result.PromotionId = promotionId == 0 ? null : promotionId;
             Result.TransactionDate = _datePicker.Value;
             Result.TotalAmount = totalAmount;
             Result.DiscountAmount = discountAmount;
+            Result.CustomerDiscountAmount = customerDiscountAmount;
             // Never read Points Used back from the control; derive it from the rule.
             Result.PointsUsed = promotion?.RequiredLoyaltyPoints > 0
                 ? promotion.RequiredLoyaltyPoints
                 : 0;
-            Result.PointsEarned = (int)_pointsEarnedBox.Value;
-            Result.FinalAmount = totalAmount - discountAmount;
+            Result.FinalAmount = totalAmount - discountAmount - customerDiscountAmount;
+            // Never read Points Earned back from the control; derive it from the rule.
+            Result.PointsEarned = CalculatePointsEarned(Result.FinalAmount);
             Result.PaymentMethod = _paymentMethodBox.Text;
             // New transactions are always Completed. Status is only user-editable
             // in edit mode, where it also carries Cancelled for the existing

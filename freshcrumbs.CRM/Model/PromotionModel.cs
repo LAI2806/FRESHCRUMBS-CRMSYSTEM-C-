@@ -21,5 +21,7 @@
         public DateTime EndDate { get; set; } = DateTime.Today.AddDays(7);
 
         public string Status { get; set; } = string.Empty;
+
+        public string? EligibilityCategory { get; set; }
     }
 }

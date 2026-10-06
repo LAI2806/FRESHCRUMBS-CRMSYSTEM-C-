@@ -15,6 +15,8 @@ namespace freshcrumbs.CRM.infrastructure.data
 
         public DbSet<Customer> Customers => Set<Customer>();
 
+        public DbSet<CustomerDiscountEligibility> CustomerDiscountEligibilities => Set<CustomerDiscountEligibility>();
+
         public DbSet<Promotion> Promotions => Set<Promotion>();
 
         public DbSet<LoyaltyTransaction> LoyaltyTransactions => Set<LoyaltyTransaction>();
@@ -50,6 +52,12 @@ namespace freshcrumbs.CRM.infrastructure.data
 
                 entity.Property(x => x.Price)
                     .HasPrecision(18, 2);
+
+                entity.Property(x => x.ReorderLevel)
+                    .HasDefaultValue(10)
+                    .HasSentinel(-1);
+
+                entity.Ignore(x => x.Sold);
 
                 entity.Property(x => x.Status)
                     .HasMaxLength(20)
@@ -90,6 +98,30 @@ namespace freshcrumbs.CRM.infrastructure.data
                 entity.HasIndex(x => x.CustomerCode)
                     .IsUnique();
             });
+            builder.Entity<CustomerDiscountEligibility>(entity =>
+            {
+                entity.HasKey(x => x.EligibilityId);
+
+                entity.Property(x => x.Category)
+                    .HasMaxLength(50)
+                    .IsRequired();
+
+                entity.Property(x => x.IdNumber)
+                    .HasMaxLength(50)
+                    .IsRequired();
+
+                entity.Property(x => x.VerificationStatus)
+                    .HasMaxLength(30)
+                    .IsRequired();
+
+                entity.HasOne(x => x.Customer)
+                    .WithMany(x => x.DiscountEligibilities)
+                    .HasForeignKey(x => x.CustomerId)
+                    .OnDelete(DeleteBehavior.Cascade);
+
+                entity.HasIndex(x => new { x.CustomerId, x.Category })
+                    .IsUnique();
+            });
             builder.Entity<Promotion>(entity =>
             {
                 entity.HasKey(x => x.PromotionId);
@@ -114,6 +146,9 @@ namespace freshcrumbs.CRM.infrastructure.data
                 entity.Property(x => x.RequiredLoyaltyPoints)
                     .HasDefaultValue(0);
 
+                entity.Property(x => x.EligibilityCategory)
+                    .HasMaxLength(50);
+
                 entity.Property(x => x.Status)
                     .HasMaxLength(20)
                     .IsRequired();
@@ -126,8 +161,11 @@ namespace freshcrumbs.CRM.infrastructure.data
                     .HasMaxLength(50)
                     .IsRequired();
 
+                entity.Property(x => x.IsDeleted)
+                    .HasDefaultValue(false);
+
                 entity.HasOne(x => x.Customer)
-                    .WithMany()
+                                    .WithMany()
                     .HasForeignKey(x => x.CustomerId)
                     .OnDelete(DeleteBehavior.Restrict);
 
@@ -144,19 +182,22 @@ namespace freshcrumbs.CRM.infrastructure.data
                     .HasMaxLength(50)
                     .IsRequired();
 
-                entity.Property(x => x.Subject)
+                entity.Property(x => x.Category)
                     .HasMaxLength(200)
                     .IsRequired();
 
-                entity.Property(x => x.Description)
+                entity.Property(x => x.Comment)
                     .HasMaxLength(1000);
 
                 entity.Property(x => x.Status)
                     .HasMaxLength(20)
                     .IsRequired();
 
+                entity.Property(x => x.IsDeleted)
+                    .HasDefaultValue(false);
+
                 entity.HasOne(x => x.Customer)
-                    .WithMany()
+                                    .WithMany()
                     .HasForeignKey(x => x.CustomerId)
                     .OnDelete(DeleteBehavior.Restrict);
             });
@@ -170,6 +211,9 @@ namespace freshcrumbs.CRM.infrastructure.data
                 entity.Property(x => x.DiscountAmount)
                     .HasPrecision(18, 2);
 
+                entity.Property(x => x.CustomerDiscountAmount)
+                    .HasPrecision(18, 2);
+
                 entity.Property(x => x.FinalAmount)
                     .HasPrecision(18, 2);
 
@@ -181,8 +225,11 @@ namespace freshcrumbs.CRM.infrastructure.data
                     .HasMaxLength(20)
                     .IsRequired();
 
+                entity.Property(x => x.IsDeleted)
+                    .HasDefaultValue(false);
+
                 entity.HasOne(x => x.Customer)
-                    .WithMany()
+                                    .WithMany()
                     .HasForeignKey(x => x.CustomerId)
                     .OnDelete(DeleteBehavior.Restrict);
 
@@ -217,6 +264,14 @@ namespace freshcrumbs.CRM.infrastructure.data
             {
                 entity.HasKey(x => x.InquiryId);
 
+                entity.Property(x => x.Type)
+                    .HasMaxLength(50)
+                    .IsRequired();
+
+                entity.Property(x => x.Source)
+                    .HasMaxLength(50)
+                    .IsRequired();
+
                 entity.Property(x => x.Subject)
                     .HasMaxLength(200)
                     .IsRequired();
@@ -235,8 +290,11 @@ namespace freshcrumbs.CRM.infrastructure.data
                 entity.Property(x => x.RespondedBy)
                     .HasMaxLength(100);
 
+                entity.Property(x => x.IsDeleted)
+                    .HasDefaultValue(false);
+
                 entity.HasOne(x => x.Customer)
-                    .WithMany()
+                                    .WithMany()
                     .HasForeignKey(x => x.CustomerId)
                     .OnDelete(DeleteBehavior.Restrict);
             });

@@ -4,7 +4,7 @@ namespace freshcrumbs.CRM.domain.entities
 {
     public class ApplicationUser : IdentityUser
     {
-        public int TenantId { get; set; }
+        public int? TenantId { get; set; }
 
         public string FirstName { get; set; } = string.Empty;
 

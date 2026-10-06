@@ -1,5 +1,7 @@
 ﻿using freshcrumbs.CRM.winforms.Models;
 using freshcrumbs.CRM.winforms.Services;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace freshcrumbs.CRM.winforms.Forms
 {
@@ -27,6 +29,21 @@ namespace freshcrumbs.CRM.winforms.Forms
         private ComboBox _statusBox = null!;
         private Label _errorLabel = null!;
 
+        private static readonly string[] EligibilityCategories =
+            { "Senior Citizen", "PWD", "Other Eligible Category" };
+        private static readonly string[] VerificationStatusOptions =
+            { "Pending Verification", "Verified", "Rejected" };
+
+        private sealed class EligibilityRow
+        {
+            public string Category { get; init; } = string.Empty;
+            public CheckBox Check { get; init; } = null!;
+            public TextBox IdBox { get; init; } = null!;
+            public ComboBox StatusBox { get; init; } = null!;
+        }
+
+        private readonly List<EligibilityRow> _eligibilityRows = new();
+
         public CustomerEditForm(CustomerModel? existingCustomer, string suggestedCode = "")
         {
             _isEditMode = existingCustomer != null;
@@ -51,7 +68,17 @@ namespace freshcrumbs.CRM.winforms.Forms
                     ContactNo = existingCustomer.ContactNo,
                     Address = existingCustomer.Address,
                     LoyaltyPoints = existingCustomer.LoyaltyPoints,
-                    Status = existingCustomer.Status
+                    Status = existingCustomer.Status,
+                    DiscountEligibilities = existingCustomer.DiscountEligibilities
+                        .Select(e => new CustomerDiscountEligibilityModel
+                        {
+                            EligibilityId = e.EligibilityId,
+                            CustomerId = e.CustomerId,
+                            Category = e.Category,
+                            IdNumber = e.IdNumber,
+                            VerificationStatus = e.VerificationStatus
+                        })
+                        .ToList()
                 };
 
                 _codeBox.Text = Result.CustomerCode;
@@ -62,7 +89,26 @@ namespace freshcrumbs.CRM.winforms.Forms
                 _addressBox.Text = Result.Address;
                 _loyaltyPointsBox.Value = Result.LoyaltyPoints;
                 _statusBox.Text = Result.Status;
+
+                foreach (var row in _eligibilityRows)
+                {
+                    var record = Result.DiscountEligibilities.FirstOrDefault(e =>
+                        string.Equals(e.Category, row.Category, StringComparison.OrdinalIgnoreCase));
+
+                    if (record == null)
+                    {
+                        continue;
+                    }
+
+                    row.Check.Checked = true;
+                    row.IdBox.Text = record.IdNumber;
+
+                    int statusIndex = row.StatusBox.FindStringExact(record.VerificationStatus);
+                    row.StatusBox.SelectedIndex = statusIndex >= 0 ? statusIndex : 0;
+                }
             }
+
+            UpdateEligibilityRowStates();
         }
 
         private void InitializeForm()
@@ -107,6 +153,21 @@ namespace freshcrumbs.CRM.winforms.Forms
             _emailBox = AddField(root, "Email");
             _contactBox = AddField(root, "Contact No.");
             _addressBox = AddField(root, "Address");
+
+            var discountLabel = new Label
+            {
+                Text = "DISCOUNT ELIGIBILITY",
+                Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
+                ForeColor = LabelGray,
+                AutoSize = true,
+                Margin = new Padding(0, 0, 0, 4)
+            };
+            root.Controls.Add(discountLabel);
+
+            foreach (var category in EligibilityCategories)
+            {
+                root.Controls.Add(BuildEligibilityRow(category));
+            }
 
             _loyaltyPointsBox = new NumericUpDown
             {
@@ -224,6 +285,80 @@ namespace freshcrumbs.CRM.winforms.Forms
             Controls.Add(root);
         }
 
+        private TableLayoutPanel BuildEligibilityRow(string category)
+        {
+            var check = new CheckBox
+            {
+                Text = category,
+                AutoSize = true,
+                Font = new Font("Segoe UI", 10),
+                ForeColor = TextDark,
+                Anchor = AnchorStyles.Left
+            };
+
+            var idBox = new TextBox
+            {
+                Width = 150,
+                Height = 30,
+                Font = new Font("Segoe UI", 9.5f),
+                BorderStyle = BorderStyle.FixedSingle,
+                PlaceholderText = "ID Number",
+                Enabled = false
+            };
+
+            var statusBox = new ComboBox
+            {
+                Width = 170,
+                Height = 30,
+                Font = new Font("Segoe UI", 9.5f),
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                FlatStyle = FlatStyle.Flat,
+                Enabled = false
+            };
+            statusBox.Items.AddRange(VerificationStatusOptions);
+            statusBox.SelectedIndex = 0;
+
+            check.CheckedChanged += (s, e) =>
+            {
+                idBox.Enabled = check.Checked;
+                statusBox.Enabled = check.Checked;
+                if (!check.Checked)
+                {
+                    idBox.Text = "";
+                    statusBox.SelectedIndex = 0;
+                    idBox.BackColor = ValidFieldColor;
+                }
+            };
+
+            _eligibilityRows.Add(new EligibilityRow
+            {
+                Category = category,
+                Check = check,
+                IdBox = idBox,
+                StatusBox = statusBox
+            });
+
+            var row = new TableLayoutPanel
+            {
+                ColumnCount = 3,
+                AutoSize = true,
+                Margin = new Padding(0, 0, 0, 8)
+            };
+            row.Controls.Add(check, 0, 0);
+            row.Controls.Add(idBox, 1, 0);
+            row.Controls.Add(statusBox, 2, 0);
+            return row;
+        }
+
+        private void UpdateEligibilityRowStates()
+        {
+            foreach (var row in _eligibilityRows)
+            {
+                row.IdBox.Enabled = row.Check.Checked;
+                row.StatusBox.Enabled = row.Check.Checked;
+            }
+        }
+
         private TextBox AddField(TableLayoutPanel root, string labelText)
         {
             var label = new Label
@@ -297,6 +432,36 @@ namespace freshcrumbs.CRM.winforms.Forms
                 return;
             }
 
+            var eligibilities = new List<CustomerDiscountEligibilityModel>();
+
+            foreach (var row in _eligibilityRows)
+            {
+                if (!row.Check.Checked)
+                {
+                    continue;
+                }
+
+                string idNumber = row.IdBox.Text.Trim();
+
+                if (!ValidationHelper.IsRequired(idNumber))
+                {
+                    ShowFieldError(row.IdBox, $"ID Number is required for {row.Category}.");
+                    return;
+                }
+
+                var existing = Result.DiscountEligibilities.FirstOrDefault(e =>
+                    string.Equals(e.Category, row.Category, StringComparison.OrdinalIgnoreCase));
+
+                eligibilities.Add(new CustomerDiscountEligibilityModel
+                {
+                    EligibilityId = existing?.EligibilityId ?? 0,
+                    CustomerId = existing?.CustomerId ?? 0,
+                    Category = row.Category,
+                    IdNumber = idNumber,
+                    VerificationStatus = row.StatusBox.Text
+                });
+            }
+
             Result.CustomerCode = code;
             Result.FirstName = firstName;
             Result.LastName = lastName;
@@ -305,6 +470,7 @@ namespace freshcrumbs.CRM.winforms.Forms
             Result.Address = address;
             Result.LoyaltyPoints = _isEditMode ? (int)_loyaltyPointsBox.Value : 0;
             Result.Status = _isEditMode ? _statusBox.Text : "Active";
+            Result.DiscountEligibilities = eligibilities;
 
             DialogResult = DialogResult.OK;
             Close();
@@ -326,6 +492,11 @@ namespace freshcrumbs.CRM.winforms.Forms
             _contactBox.BackColor = ValidFieldColor;
             _addressBox.BackColor = ValidFieldColor;
             _statusBox.BackColor = ValidFieldColor;
+
+            foreach (var row in _eligibilityRows)
+            {
+                row.IdBox.BackColor = ValidFieldColor;
+            }
         }
     }
 }

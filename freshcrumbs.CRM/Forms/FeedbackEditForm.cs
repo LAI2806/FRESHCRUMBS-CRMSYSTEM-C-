@@ -14,11 +14,25 @@ namespace freshcrumbs.CRM.winforms.Forms
         private static readonly Color LabelGray = Color.FromArgb(120, 110, 100);
         private static readonly Color BorderColor = Color.FromArgb(220, 210, 200);
         private static readonly Color PageBg = Color.White;
+        private static readonly Color ReadOnlyFieldColor = Color.FromArgb(250, 246, 242);
 
-        private ComboBox _customerBox = null!;
+        private static readonly string[] CategoryOptions =
+        {
+            "Customer Service",
+            "Product Quality",
+            "Product Availability",
+            "Orders",
+            "Pricing and Payments",
+            "Packaging"
+        };
+
+        private TextBox _customerCodeBox = null!;
+        private TextBox _customerNameBox = null!;
+        private Label _customerLookupLabel = null!;
+        private CustomerModel? _selectedCustomer;
         private ComboBox _typeBox = null!;
-        private TextBox _subjectBox = null!;
-        private TextBox _descriptionBox = null!;
+        private ComboBox _categoryBox = null!;
+        private TextBox _commentBox = null!;
         private DateTimePicker _datePicker = null!;
         private ComboBox _statusBox = null!;
         private Label _errorLabel = null!;
@@ -38,16 +52,22 @@ namespace freshcrumbs.CRM.winforms.Forms
                     FeedbackId = existingFeedback.FeedbackId,
                     CustomerId = existingFeedback.CustomerId,
                     Type = existingFeedback.Type,
-                    Subject = existingFeedback.Subject,
-                    Description = existingFeedback.Description,
+                    Category = existingFeedback.Category,
+                    Comment = existingFeedback.Comment,
                     DateSubmitted = existingFeedback.DateSubmitted,
                     Status = existingFeedback.Status
                 };
 
-                _customerBox.SelectedValue = Result.CustomerId;
+                // The customer is locked in edit mode: the update endpoint never changes
+                // CustomerId, so the existing customer is shown read-only.
+                var existingCustomer = _customers.FirstOrDefault(c => c.CustomerId == Result.CustomerId);
+                _customerCodeBox.Text = existingCustomer?.CustomerCode ?? string.Empty;
+                _customerCodeBox.ReadOnly = true;
+                _customerCodeBox.TabStop = false;
+                _customerCodeBox.BackColor = ReadOnlyFieldColor;
                 _typeBox.Text = Result.Type;
-                _subjectBox.Text = Result.Subject;
-                _descriptionBox.Text = Result.Description;
+                _categoryBox.Text = Result.Category;
+                _commentBox.Text = Result.Comment;
                 _datePicker.Value = Result.DateSubmitted;
                 _statusBox.Text = Result.Status;
             }
@@ -89,29 +109,66 @@ namespace freshcrumbs.CRM.winforms.Forms
             };
             root.Controls.Add(titleLabel);
 
-            var customerLabel = new Label
+            var customerCodeLabel = new Label
             {
-                Text = "CUSTOMER",
+                Text = "CUSTOMER CODE",
                 Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
                 ForeColor = LabelGray,
                 AutoSize = true,
                 Margin = new Padding(0, 0, 0, 4)
             };
-            root.Controls.Add(customerLabel);
+            root.Controls.Add(customerCodeLabel);
 
-            _customerBox = new ComboBox
+            _customerCodeBox = new TextBox
             {
                 Width = 380,
                 Height = 34,
                 Font = new Font("Segoe UI", 10.5f),
-                DropDownStyle = ComboBoxStyle.DropDownList,
-                FlatStyle = FlatStyle.Flat,
-                Margin = new Padding(0, 0, 0, 14),
-                DataSource = _customers,
-                DisplayMember = "FirstName",
-                ValueMember = "CustomerId"
+                BorderStyle = BorderStyle.FixedSingle,
+                PlaceholderText = "Enter Customer Code (e.g. CUST-001)",
+                Margin = new Padding(0, 0, 0, 14)
             };
-            root.Controls.Add(_customerBox);
+            root.Controls.Add(_customerCodeBox);
+
+            var customerNameLabel = new Label
+            {
+                Text = "CUSTOMER NAME",
+                Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
+                ForeColor = LabelGray,
+                AutoSize = true,
+                Margin = new Padding(0, 0, 0, 4)
+            };
+            root.Controls.Add(customerNameLabel);
+
+            _customerNameBox = new TextBox
+            {
+                Width = 380,
+                Height = 34,
+                Font = new Font("Segoe UI", 10.5f),
+                BorderStyle = BorderStyle.FixedSingle,
+                ReadOnly = true,
+                TabStop = false,
+                BackColor = ReadOnlyFieldColor,
+                ForeColor = TextDark,
+                PlaceholderText = "Filled in automatically from the Customer Code",
+                Margin = new Padding(0, 0, 0, 2)
+            };
+            root.Controls.Add(_customerNameBox);
+
+            // Fixed height so the dialog does not jump when a lookup message appears.
+            _customerLookupLabel = new Label
+            {
+                Text = "",
+                Font = new Font("Segoe UI", 9, FontStyle.Italic),
+                ForeColor = Color.Firebrick,
+                AutoSize = false,
+                Width = 380,
+                Height = 20,
+                Margin = new Padding(0, 0, 0, 10)
+            };
+            root.Controls.Add(_customerLookupLabel);
+
+            _customerCodeBox.TextChanged += (s, e) => ResolveCustomerFromCode();
 
             var typeLabel = new Label
             {
@@ -136,8 +193,49 @@ namespace freshcrumbs.CRM.winforms.Forms
             _typeBox.SelectedIndex = 0;
             root.Controls.Add(_typeBox);
 
-            _subjectBox = AddField(root, "Subject");
-            _descriptionBox = AddField(root, "Description");
+            var categoryLabel = new Label
+            {
+                Text = "CATEGORY",
+                Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
+                ForeColor = LabelGray,
+                AutoSize = true,
+                Margin = new Padding(0, 0, 0, 4)
+            };
+            root.Controls.Add(categoryLabel);
+
+            _categoryBox = new ComboBox
+            {
+                Width = 380,
+                Height = 34,
+                Font = new Font("Segoe UI", 10.5f),
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                FlatStyle = FlatStyle.Flat,
+                Margin = new Padding(0, 0, 0, 14)
+            };
+            _categoryBox.Items.AddRange(CategoryOptions);
+            root.Controls.Add(_categoryBox);
+
+            var commentLabel = new Label
+            {
+                Text = "COMMENT",
+                Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
+                ForeColor = LabelGray,
+                AutoSize = true,
+                Margin = new Padding(0, 0, 0, 4)
+            };
+            root.Controls.Add(commentLabel);
+
+            _commentBox = new TextBox
+            {
+                Width = 380,
+                Height = 80,
+                Font = new Font("Segoe UI", 10.5f),
+                BorderStyle = BorderStyle.FixedSingle,
+                Multiline = true,
+                ScrollBars = ScrollBars.Vertical,
+                Margin = new Padding(0, 0, 0, 14)
+            };
+            root.Controls.Add(_commentBox);
 
             var dateLabel = new Label
             {
@@ -250,57 +348,75 @@ namespace freshcrumbs.CRM.winforms.Forms
             Controls.Add(root);
         }
 
-        private TextBox AddField(TableLayoutPanel root, string labelText)
+        private void ResolveCustomerFromCode()
         {
-            var label = new Label
-            {
-                Text = labelText.ToUpperInvariant(),
-                Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
-                ForeColor = LabelGray,
-                AutoSize = true,
-                Margin = new Padding(0, 0, 0, 4)
-            };
-            root.Controls.Add(label);
+            string code = _customerCodeBox.Text.Trim();
 
-            var textBox = new TextBox
-            {
-                Width = 380,
-                Height = 34,
-                Font = new Font("Segoe UI", 10.5f),
-                BorderStyle = BorderStyle.FixedSingle,
-                Margin = new Padding(0, 0, 0, 14)
-            };
-            root.Controls.Add(textBox);
+            _selectedCustomer = null;
+            _customerNameBox.Text = string.Empty;
+            _customerLookupLabel.Text = string.Empty;
 
-            return textBox;
+            if (code.Length == 0)
+            {
+                return;
+            }
+
+            // Lookup is by the existing CustomerCode only: trimmed and case-insensitive.
+            var customer = _customers.FirstOrDefault(c =>
+                string.Equals(c.CustomerCode.Trim(), code, StringComparison.OrdinalIgnoreCase));
+
+            if (customer == null)
+            {
+                _customerLookupLabel.Text = "Customer code not found.";
+                return;
+            }
+
+            // New records can only be created for active customers. In edit mode the
+            // customer is locked, so an inactive customer is still displayed.
+            if (!_isEditMode && !string.Equals(customer.Status, "Active", StringComparison.OrdinalIgnoreCase))
+            {
+                _customerLookupLabel.Text = "This customer is inactive and cannot be selected.";
+                return;
+            }
+
+            _selectedCustomer = customer;
+            _customerNameBox.Text = $"{customer.FirstName} {customer.LastName}";
         }
 
         private void SaveButton_Click(object? sender, EventArgs e)
         {
             _errorLabel.Text = "";
 
-            if (_customerBox.SelectedValue is not int customerId)
+            // In edit mode the customer is locked, so the existing CustomerId is kept.
+            int customerId = Result.CustomerId;
+
+            if (!_isEditMode)
             {
-                _errorLabel.Text = "Please select a customer.";
+                if (_selectedCustomer == null)
+                {
+                    _errorLabel.Text = "Please enter a valid Customer Code.";
+                    return;
+                }
+
+                customerId = _selectedCustomer.CustomerId;
+            }
+
+            if (_categoryBox.SelectedIndex < 0)
+            {
+                _errorLabel.Text = "Please select a category.";
                 return;
             }
 
-            if (string.IsNullOrWhiteSpace(_subjectBox.Text))
+            if (string.IsNullOrWhiteSpace(_commentBox.Text))
             {
-                _errorLabel.Text = "Subject is required.";
-                return;
-            }
-
-            if (string.IsNullOrWhiteSpace(_descriptionBox.Text))
-            {
-                _errorLabel.Text = "Description is required.";
+                _errorLabel.Text = "Comment is required.";
                 return;
             }
 
             Result.CustomerId = customerId;
             Result.Type = _typeBox.Text;
-            Result.Subject = _subjectBox.Text.Trim();
-            Result.Description = _descriptionBox.Text.Trim();
+            Result.Category = _categoryBox.Text;
+            Result.Comment = _commentBox.Text.Trim();
             Result.DateSubmitted = _datePicker.Value;
             Result.Status = _isEditMode ? _statusBox.Text : "Pending";
 
