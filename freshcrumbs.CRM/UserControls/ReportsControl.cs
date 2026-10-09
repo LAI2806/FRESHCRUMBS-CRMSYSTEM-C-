@@ -330,16 +330,32 @@ namespace freshcrumbs.CRM.winforms.UserControls
 
         private void PopulateReportTypes()
         {
-            _reportTypeCombo.Items.Add(new ReportOption("Sales Report", "sales", true));
-            _reportTypeCombo.Items.Add(new ReportOption("Customer Report", "customers", true));
-            _reportTypeCombo.Items.Add(new ReportOption("Inventory Report", "inventory", false));
-            _reportTypeCombo.Items.Add(new ReportOption("Product Sales Report", "product-sales", true));
-            _reportTypeCombo.Items.Add(new ReportOption("Loyalty Report", "loyalty", true));
-            _reportTypeCombo.Items.Add(new ReportOption("Promotion Report", "promotions", true));
-            _reportTypeCombo.Items.Add(new ReportOption("Discount Report", "discounts", true));
-            _reportTypeCombo.Items.Add(new ReportOption("Feedback Report", "feedback", true));
-            _reportTypeCombo.Items.Add(new ReportOption("Inquiry Report", "inquiries", true));
-            _reportTypeCombo.SelectedIndex = 0;
+            var options = new[]
+            {
+                new ReportOption("Sales Report", "sales", true),
+                new ReportOption("Customer Report", "customers", true),
+                new ReportOption("Inventory Report", "inventory", false),
+                new ReportOption("Product Sales Report", "product-sales", true),
+                new ReportOption("Loyalty Report", "loyalty", true),
+                new ReportOption("Promotion Report", "promotions", true),
+                new ReportOption("Discount Report", "discounts", true),
+                new ReportOption("Feedback Report", "feedback", true),
+                new ReportOption("Inquiry Report", "inquiries", true),
+                new ReportOption("Business Summary Report", "business-summary", true)
+            };
+
+            foreach (var option in options)
+            {
+                if (TenantCapabilities.CanGenerateReport(option.Key))
+                {
+                    _reportTypeCombo.Items.Add(option);
+                }
+            }
+
+            if (_reportTypeCombo.Items.Count > 0)
+            {
+                _reportTypeCombo.SelectedIndex = 0;
+            }
         }
 
         private ReportOption? SelectedReport
@@ -371,7 +387,8 @@ namespace freshcrumbs.CRM.winforms.UserControls
                 return false;
             }
 
-            if ((end - start).TotalDays > MaxRangeDays)
+            // The API counts the end day too, so the same span is compared here.
+            if ((end.Date - start.Date).TotalDays >= MaxRangeDays)
             {
                 _statusLabel.Text = "The selected date range cannot exceed 10 years.";
                 return false;

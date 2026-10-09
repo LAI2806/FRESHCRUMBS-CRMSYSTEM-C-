@@ -10,17 +10,65 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
-            migrationBuilder.DropColumn(
-                name: "DiscountEligibility",
-                table: "Customers");
+            // Legacy column: exists only on older databases; fresh databases never had it.
+            migrationBuilder.Sql(@"
+                IF COL_LENGTH(N'dbo.Customers', N'DiscountEligibility') IS NOT NULL
+                BEGIN
+                    DECLARE @constraintName nvarchar(128);
+                    SELECT @constraintName = dc.name
+                    FROM sys.default_constraints dc
+                    INNER JOIN sys.columns col
+                        ON col.object_id = dc.parent_object_id
+                        AND col.column_id = dc.parent_column_id
+                    WHERE dc.parent_object_id = OBJECT_ID(N'dbo.Customers')
+                        AND col.name = N'DiscountEligibility';
 
-            migrationBuilder.DropColumn(
-                name: "DiscountIdNumber",
-                table: "Customers");
+                    IF @constraintName IS NOT NULL
+                        EXEC(N'ALTER TABLE [dbo].[Customers] DROP CONSTRAINT [' + @constraintName + N']');
 
-            migrationBuilder.DropColumn(
-                name: "VerificationStatus",
-                table: "Customers");
+                    EXEC(N'ALTER TABLE [dbo].[Customers] DROP COLUMN [DiscountEligibility]');
+                END
+            ");
+
+            // Legacy column: exists only on older databases; fresh databases never had it.
+            migrationBuilder.Sql(@"
+                IF COL_LENGTH(N'dbo.Customers', N'DiscountIdNumber') IS NOT NULL
+                BEGIN
+                    DECLARE @constraintName nvarchar(128);
+                    SELECT @constraintName = dc.name
+                    FROM sys.default_constraints dc
+                    INNER JOIN sys.columns col
+                        ON col.object_id = dc.parent_object_id
+                        AND col.column_id = dc.parent_column_id
+                    WHERE dc.parent_object_id = OBJECT_ID(N'dbo.Customers')
+                        AND col.name = N'DiscountIdNumber';
+
+                    IF @constraintName IS NOT NULL
+                        EXEC(N'ALTER TABLE [dbo].[Customers] DROP CONSTRAINT [' + @constraintName + N']');
+
+                    EXEC(N'ALTER TABLE [dbo].[Customers] DROP COLUMN [DiscountIdNumber]');
+                END
+            ");
+
+            // Legacy column: exists only on older databases; fresh databases never had it.
+            migrationBuilder.Sql(@"
+                IF COL_LENGTH(N'dbo.Customers', N'VerificationStatus') IS NOT NULL
+                BEGIN
+                    DECLARE @constraintName nvarchar(128);
+                    SELECT @constraintName = dc.name
+                    FROM sys.default_constraints dc
+                    INNER JOIN sys.columns col
+                        ON col.object_id = dc.parent_object_id
+                        AND col.column_id = dc.parent_column_id
+                    WHERE dc.parent_object_id = OBJECT_ID(N'dbo.Customers')
+                        AND col.name = N'VerificationStatus';
+
+                    IF @constraintName IS NOT NULL
+                        EXEC(N'ALTER TABLE [dbo].[Customers] DROP CONSTRAINT [' + @constraintName + N']');
+
+                    EXEC(N'ALTER TABLE [dbo].[Customers] DROP COLUMN [VerificationStatus]');
+                END
+            ");
 
             migrationBuilder.AddColumn<string>(
                 name: "EligibilityCategory",

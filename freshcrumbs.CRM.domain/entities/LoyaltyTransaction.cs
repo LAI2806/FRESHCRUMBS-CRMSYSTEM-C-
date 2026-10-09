@@ -2,8 +2,14 @@
 
 namespace freshcrumbs.CRM.domain.entities
 {
-    public class LoyaltyTransaction
+    public class LoyaltyTransaction : ISyncEntity
     {
+        // Sync identity (offline-first): global id used to match records between local and cloud databases.
+        public Guid RowGuid { get; set; } = Guid.NewGuid();
+
+        // UTC time of the last change; used for conflict resolution and incremental pull.
+        public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+
         public int LoyaltyTransactionId { get; set; }
 
         public int CustomerId { get; set; }

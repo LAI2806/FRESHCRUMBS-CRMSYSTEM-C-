@@ -24,6 +24,11 @@ namespace freshcrumbs.CRM.winforms.Models
 
         public string Status { get; set; } = string.Empty;
 
+        // PREMIUM: registration branch (set by the server) and every associated branch (registration + sales).
+        public int? BranchId { get; set; }
+
+        public string? BranchNames { get; set; }
+
         public List<CustomerDiscountEligibilityModel> DiscountEligibilities { get; set; } = new List<CustomerDiscountEligibilityModel>();
 
         // Computed for the Customer grid only (e.g. "Senior Citizen - Verified, PWD - Verified").

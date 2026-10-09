@@ -2,8 +2,14 @@
 
 namespace freshcrumbs.CRM.domain.entities
 {
-    public class Inquiry
+    public class Inquiry : ISyncEntity
     {
+        // Sync identity (offline-first): global id used to match records between local and cloud databases.
+        public Guid RowGuid { get; set; } = Guid.NewGuid();
+
+        // UTC time of the last change; used for conflict resolution and incremental pull.
+        public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+
         public int InquiryId { get; set; }
 
         public int CustomerId { get; set; }
@@ -27,6 +33,12 @@ namespace freshcrumbs.CRM.domain.entities
         public DateTime? RespondedAt { get; set; }
 
         public bool IsDeleted { get; set; } = false;
+
+        // PREMIUM (Branching) only: the branch where it was recorded (set by the server). Null for older records.
+        public int? BranchId { get; set; }
+
+        // Not stored. Branch name for display.
+        public string? BranchName { get; set; }
 
         public Customer? Customer { get; set; }
     }

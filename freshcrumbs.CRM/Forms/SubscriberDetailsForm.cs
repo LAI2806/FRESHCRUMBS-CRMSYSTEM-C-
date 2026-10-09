@@ -97,6 +97,9 @@ namespace freshcrumbs.CRM.winforms.Forms
             _suspendButton = CreateButton("Suspend", 445, 340, 110, Color.White, LabelGray);
             _suspendButton.Click += SuspendButton_Click;
 
+            var createAdminButton = CreateButton("Create Admin", 565, 340, 130, Color.White, AccentColor);
+            createAdminButton.Click += CreateAdminButton_Click;
+
             Controls.Add(new Label
             {
                 Text = "Subscription History",
@@ -301,6 +304,35 @@ namespace freshcrumbs.CRM.winforms.Forms
                 await _apiService.SetSubscriptionSuspendedAsync(_companyId, suspend);
                 await LoadDetailAsync();
                 AdminUi.ShowSuccess(_statusLabel, suspend ? "The subscription was suspended." : "The subscription was reactivated.");
+            }
+            catch (Exception ex)
+            {
+                AdminUi.ShowError(_statusLabel, ex);
+            }
+        }
+
+
+        // A company without an active Admin gets one (the API refuses when an active Admin already exists).
+        private async void CreateAdminButton_Click(object? sender, EventArgs e)
+        {
+            using var form = new TenantUserEditForm(null, null, adminAccount: true);
+
+            if (form.ShowDialog(this) != DialogResult.OK)
+            {
+                return;
+            }
+
+            try
+            {
+                var admin = await _apiService.CreateTenantAdminAsync(_companyId, form.Result);
+
+                using (var passwordForm = new TemporaryPasswordForm(admin.FullName, admin.Email, admin.TemporaryPassword))
+                {
+                    passwordForm.ShowDialog(this);
+                }
+
+                await LoadDetailAsync();
+                AdminUi.ShowSuccess(_statusLabel, $"{admin.FullName} was created as the company Admin.");
             }
             catch (Exception ex)
             {

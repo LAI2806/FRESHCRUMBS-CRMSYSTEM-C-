@@ -18,6 +18,11 @@ namespace freshcrumbs.CRM.winforms.Forms
         private TextBox _addressBox = null!;
         private TextBox _contactBox = null!;
         private TextBox _emailBox = null!;
+        private TextBox _adminFirstNameBox = null!;
+        private TextBox _adminLastNameBox = null!;
+        private TextBox _adminEmailBox = null!;
+        private TextBox _adminContactBox = null!;
+        private TextBox _databaseKeyBox = null!;
         private ComboBox _planBox = null!;
         private PlanTermsPanel _termsPanel = null!;
         private DateTimePicker _startPicker = null!;
@@ -35,6 +40,7 @@ namespace freshcrumbs.CRM.winforms.Forms
             MinimizeBox = false;
             BackColor = Color.White;
             Font = new Font("Segoe UI", 9.5f);
+            AutoScroll = true;
 
             InitializeControls();
 
@@ -85,6 +91,26 @@ namespace freshcrumbs.CRM.winforms.Forms
             y += 62;
             _emailBox = AddField("Email *", y, 150);
 
+            y += 70;
+            Controls.Add(new Label
+            {
+                Text = "Company Admin (first sign-in account, role ADMIN)",
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                ForeColor = TextDark,
+                Location = new Point(30, y),
+                AutoSize = true
+            });
+            y += 30;
+            _adminFirstNameBox = AddField("Admin First Name *", y, 100);
+            y += 62;
+            _adminLastNameBox = AddField("Admin Last Name *", y, 100);
+            y += 62;
+            _adminEmailBox = AddField("Admin Email * (sign-in name)", y, 256);
+            y += 62;
+            _adminContactBox = AddField("Admin Contact Number", y, 20);
+            y += 62;
+            _databaseKeyBox = AddField("Database Key * (the existing database's key in the cloud configuration)", y, 100);
+
             y += 66;
             Controls.Add(new Label
             {
@@ -133,8 +159,8 @@ namespace freshcrumbs.CRM.winforms.Forms
             y += 62;
             Controls.Add(new Label
             {
-                Text = "Registering a company does not create its tenant database. " +
-                       "The database is provisioned separately.",
+                Text = "The tenant database must already exist and its key must be in the cloud configuration. " +
+                       "The Admin receives a one-time temporary password.",
                 Location = new Point(30, y),
                 Size = new Size(440, 40),
                 ForeColor = LabelGray,
@@ -252,6 +278,32 @@ namespace freshcrumbs.CRM.winforms.Forms
                 return;
             }
 
+            if (!ValidationHelper.IsRequired(_adminFirstNameBox.Text) || !ValidationHelper.IsRequired(_adminLastNameBox.Text))
+            {
+                _errorLabel.Text = "The Admin's first and last name are required.";
+                return;
+            }
+
+            if (!ValidationHelper.IsValidEmail(_adminEmailBox.Text.Trim()))
+            {
+                _errorLabel.Text = "Enter a valid Admin email address. It is the Admin's sign-in name.";
+                return;
+            }
+
+            string adminContact = _adminContactBox.Text.Trim();
+
+            if (adminContact.Length > 0 && !ValidationHelper.IsValidPhoneNumber(adminContact))
+            {
+                _errorLabel.Text = "The Admin contact number must be 7 to 20 characters (digits, +, -, spaces, parentheses).";
+                return;
+            }
+
+            if (!ValidationHelper.IsRequired(_databaseKeyBox.Text))
+            {
+                _errorLabel.Text = "Enter the database key of the company's tenant database.";
+                return;
+            }
+
             if (_planBox.SelectedItem is not PlanOption option)
             {
                 _errorLabel.Text = "Please select a plan.";
@@ -262,19 +314,28 @@ namespace freshcrumbs.CRM.winforms.Forms
 
             try
             {
-                await _apiService.RegisterSubscriberAsync(
+                var registered = await _apiService.RegisterSubscriberAsync(
                     _codeBox.Text.Trim(),
                     _nameBox.Text.Trim(),
                     _addressBox.Text.Trim(),
                     _contactBox.Text.Trim(),
                     _emailBox.Text.Trim(),
                     option.Plan.PlanId,
-                    _startPicker.Value.Date);
+                    _startPicker.Value.Date,
+                    new TenantUserModel
+                    {
+                        FirstName = _adminFirstNameBox.Text.Trim(),
+                        LastName = _adminLastNameBox.Text.Trim(),
+                        Email = _adminEmailBox.Text.Trim(),
+                        ContactNumber = adminContact
+                    },
+                    _databaseKeyBox.Text.Trim());
 
-                MessageBox.Show(
-                    "The tenant was registered with the selected plan.\n\n" +
-                    "Reminder: the tenant database for this company still has to be provisioned separately.",
-                    "Tenant Registered", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                using (var passwordForm = new TemporaryPasswordForm(
+                           registered.Admin.FullName, registered.Admin.Email, registered.Admin.TemporaryPassword))
+                {
+                    passwordForm.ShowDialog(this);
+                }
 
                 DialogResult = DialogResult.OK;
                 Close();

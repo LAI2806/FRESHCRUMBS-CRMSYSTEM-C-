@@ -25,6 +25,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
         private Button _editButton = null!;
         private Button _deleteButton = null!;
         private Button _reactivateButton = null!;
+        private Button _branchStockButton = null!;
         private Label _statusLabel = null!;
         private Panel _pagerPanel = null!;
         private Label _pageInfoLabel = null!;
@@ -63,7 +64,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
 
             var header = new Label
             {
-                Text = "Product Management",
+                Text = TenantCapabilities.CanManageProducts ? "Product Management" : "Product List",
                 Font = new Font("Segoe UI", 20, FontStyle.Bold),
                 ForeColor = TextDark,
                 Dock = DockStyle.Fill,
@@ -115,6 +116,17 @@ namespace freshcrumbs.CRM.winforms.UserControls
             _reactivateButton.Click += ReactivateButton_Click;
             toolbarPanel.Controls.Add(_reactivateButton);
 
+            // PREMIUM (Branching) ADMIN: stock per branch for the selected product. Shares the Reactivate slot,
+            // which is only shown for inactive products.
+            _branchStockButton = CreateActionButton("Branch Stock", Color.White, AccentColor, 110);
+            _branchStockButton.FlatAppearance.BorderSize = 1;
+            _branchStockButton.FlatAppearance.BorderColor = AccentColor;
+            _branchStockButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            _branchStockButton.Enabled = false;
+            _branchStockButton.Visible = CanUseBranchStock;
+            _branchStockButton.Click += BranchStockButton_Click;
+            toolbarPanel.Controls.Add(_branchStockButton);
+
             _statusFilterBox = new ComboBox
             {
                 Location = new Point(330, 10),
@@ -132,8 +144,14 @@ namespace freshcrumbs.CRM.winforms.UserControls
             toolbarPanel.Resize += (s, e) => PositionToolbarButtons(toolbarPanel);
             PositionToolbarButtons(toolbarPanel);
 
-            toolbarPanel.Resize += (s, e) => PositionToolbarButtons(toolbarPanel);
-            PositionToolbarButtons(toolbarPanel);
+            // Everyone with product access can view, search and filter. Only product managers
+            // (ADMIN / MANAGER) get Add / Edit / Delete / Reactivate; the API enforces this too.
+            if (!TenantCapabilities.CanManageProducts)
+            {
+                _addButton.Visible = false;
+                _editButton.Visible = false;
+                _deleteButton.Visible = false;
+            }
 
             rootLayout.Controls.Add(toolbarPanel, 0, 1);
 
@@ -201,6 +219,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
             _addButton.Location = new Point(toolbarPanel.Width - _addButton.Width, 8);
             _editButton.Location = new Point(_addButton.Left - _editButton.Width - 10, 8);
             _reactivateButton.Location = new Point(_editButton.Left - _reactivateButton.Width - 10, 8);
+            _branchStockButton.Location = _reactivateButton.Location;
             _deleteButton.Location = new Point(_reactivateButton.Left - _deleteButton.Width - 10, 8);
         }
 
@@ -355,7 +374,14 @@ namespace freshcrumbs.CRM.winforms.UserControls
             SetColumnHeader("Category", "Category");
             SetColumnHeader("Description", "Description");
             SetColumnHeader("Price", "Price");
-            SetColumnHeader("Quantity", "Stock");
+            SetColumnHeader("Quantity", TenantCapabilities.HasBranching ? "Total Stock" : "Stock");
+            SetColumnHeader("BranchQuantity", "My Branch Stock");
+
+            if (_productGrid.Columns["BranchQuantity"] != null)
+            {
+                _productGrid.Columns["BranchQuantity"].Visible =
+                    TenantCapabilities.HasBranching && _products.Any(p => p.BranchQuantity != null);
+            }
             SetColumnHeader("Sold", "Sold");
             SetColumnHeader("ReorderLevel", "Reorder");
             SetColumnHeader("StockLevel", "Stock Level");
@@ -421,8 +447,32 @@ namespace freshcrumbs.CRM.winforms.UserControls
 
             _editButton.Enabled = hasSelection && !isInactive;
             _deleteButton.Enabled = hasSelection && !isInactive;
-            _reactivateButton.Visible = isInactive;
-            _reactivateButton.Enabled = isInactive;
+            bool canReactivate = isInactive && TenantCapabilities.CanManageProducts;
+
+            _reactivateButton.Visible = canReactivate;
+            _reactivateButton.Enabled = canReactivate;
+
+            _branchStockButton.Visible = CanUseBranchStock && !canReactivate;
+            _branchStockButton.Enabled = hasSelection && !isInactive;
+        }
+
+        private static bool CanUseBranchStock => TenantCapabilities.HasBranching && TenantCapabilities.CanManageBranches;
+
+        private async void BranchStockButton_Click(object? sender, EventArgs e)
+        {
+            if (_productGrid.SelectedRows.Count == 0 ||
+                _productGrid.SelectedRows[0].DataBoundItem is not ProductModel selectedProduct)
+            {
+                return;
+            }
+
+            using var form = new ProductBranchStockForm(_companyId, selectedProduct);
+            form.ShowDialog(this);
+
+            if (form.StockChanged)
+            {
+                await LoadProductsAsync();
+            }
         }
 
         private string? GetSelectedStatus()

@@ -124,6 +124,21 @@
         public bool IsActive { get; set; }
     }
 
+    // SuperAdmin onboarding: the company's first ADMIN and its one-time temporary password (shown once).
+    public class CreatedTenantAdminModel
+    {
+        public string Id { get; set; } = string.Empty;
+        public string FullName { get; set; } = string.Empty;
+        public string Email { get; set; } = string.Empty;
+        public string TemporaryPassword { get; set; } = string.Empty;
+    }
+
+    public class RegisteredSubscriberModel
+    {
+        public SubscriberDetailModel? Subscriber { get; set; }
+        public CreatedTenantAdminModel Admin { get; set; } = new();
+    }
+
     public class SubscriberDetailModel
     {
         public SubscriberCompanyModel Company { get; set; } = new();
@@ -152,5 +167,10 @@
         public string? PlanName { get; set; }
 
         public List<string> Features { get; set; } = new();
+
+        // Tenant role as stored on the server, and what that role may do under this plan (role AND feature).
+        public string? Role { get; set; }
+
+        public List<string> Permissions { get; set; } = new();
     }
 }

@@ -10,9 +10,16 @@ namespace freshcrumbs.CRM.winforms.Forms
 
         private readonly bool _isEditMode;
         private readonly List<CustomerModel> _customers;
+        private readonly int _companyId;
+        private bool _lookingUpCustomer;
         private readonly List<PromotionModel> _promotions;
         private readonly List<ProductModel> _products;
         private readonly List<TransactionItemModel> _items = new();
+        private readonly List<BranchModel> _branches;
+        private readonly BranchModel? _myBranch;
+        private readonly int? _editBranchId;
+        private readonly int? _editPromotionId;
+        private ComboBox? _branchBox;
 
         private static readonly Color AccentColor = Color.FromArgb(210, 140, 60);
         private static readonly Color TextDark = Color.FromArgb(50, 35, 25);
@@ -50,12 +57,24 @@ namespace freshcrumbs.CRM.winforms.Forms
         private Label _errorLabel = null!;
         private int? _selectedCustomerLoyaltyBalance;
 
-        public SalesEditForm(SalesTransactionModel? existingTransaction, List<CustomerModel> customers, List<PromotionModel> promotions, List<ProductModel> products)
+        public SalesEditForm(
+            SalesTransactionModel? existingTransaction,
+            List<CustomerModel> customers,
+            List<PromotionModel> promotions,
+            List<ProductModel> products,
+            List<BranchModel>? branches = null,
+            BranchModel? myBranch = null,
+            int companyId = 0)
         {
             _isEditMode = existingTransaction != null;
             _customers = customers;
+            _companyId = companyId;
             _promotions = promotions;
             _products = products;
+            _branches = branches ?? new List<BranchModel>();
+            _myBranch = myBranch;
+            _editBranchId = existingTransaction?.BranchId;
+            _editPromotionId = existingTransaction?.PromotionId;
 
             InitializeForm();
             InitializeControls();
@@ -67,6 +86,7 @@ namespace freshcrumbs.CRM.winforms.Forms
                     TransactionId = existingTransaction.TransactionId,
                     CustomerId = existingTransaction.CustomerId,
                     PromotionId = existingTransaction.PromotionId,
+                    BranchId = existingTransaction.BranchId,
                     TransactionDate = existingTransaction.TransactionDate,
                     TotalAmount = existingTransaction.TotalAmount,
                     DiscountAmount = existingTransaction.DiscountAmount,
@@ -197,6 +217,59 @@ namespace freshcrumbs.CRM.winforms.Forms
             _datePicker.ValueChanged += (s, e) => RecalculateDiscount(GetEffectiveTotal());
             root.Controls.Add(_datePicker);
 
+            // PREMIUM (Branching): ADMIN picks the branch (defaults to their own); MANAGER / STAFF always sell
+            // from their assigned branch. The API applies the same rule.
+            if (!_isEditMode && TenantCapabilities.HasBranching)
+            {
+                AddSectionLabel(root, "BRANCH");
+
+                if (AuthSession.IsAdmin)
+                {
+                    var branchOptions = new List<BranchOption>();
+
+                    if (_myBranch == null)
+                    {
+                        branchOptions.Add(new BranchOption { BranchId = null, Name = "-- Select a branch --" });
+                    }
+
+                    // The admin's own branch (if any) is listed first, so it is the default selection.
+                    branchOptions.AddRange(_branches
+                        .Where(b => string.Equals(b.Status, "Active", StringComparison.OrdinalIgnoreCase))
+                        .OrderBy(b => b.BranchId == _myBranch?.BranchId ? 0 : 1)
+                        .ThenBy(b => b.BranchName)
+                        .Select(b => new BranchOption { BranchId = b.BranchId, Name = b.BranchName }));
+
+                    _branchBox = new ComboBox
+                    {
+                        Width = 540,
+                        Height = 34,
+                        Font = new Font("Segoe UI", 10.5f),
+                        DropDownStyle = ComboBoxStyle.DropDownList,
+                        FlatStyle = FlatStyle.Flat,
+                        Margin = new Padding(0, 0, 0, 14),
+                        DataSource = branchOptions,
+                        DisplayMember = "Name"
+                    };
+                    root.Controls.Add(_branchBox);
+                }
+                else
+                {
+                    root.Controls.Add(new TextBox
+                    {
+                        Width = 540,
+                        Height = 34,
+                        Font = new Font("Segoe UI", 10.5f),
+                        BorderStyle = BorderStyle.FixedSingle,
+                        ReadOnly = true,
+                        TabStop = false,
+                        BackColor = HeaderRowColor,
+                        ForeColor = _myBranch == null ? Color.Firebrick : TextDark,
+                        Text = _myBranch?.BranchName ?? "Not assigned to a branch - ask your administrator.",
+                        Margin = new Padding(0, 0, 0, 14)
+                    });
+                }
+            }
+
             if (!_isEditMode)
             {
                 AddSectionLabel(root, "ITEMS");
@@ -266,9 +339,12 @@ namespace freshcrumbs.CRM.winforms.Forms
                 root.Controls.Add(_itemsGrid);
             }
 
-            AddSectionLabel(root, "PROMOTION (OPTIONAL)");
-            var promotionOptions = new List<PromotionOption> { new PromotionOption { PromotionId = 0, PromotionName = "-- None --" } };
-            promotionOptions.AddRange(_promotions.Select(p => new PromotionOption { PromotionId = p.PromotionId, PromotionName = p.PromotionName }));
+            if (TenantCapabilities.CanUsePromotions)
+            {
+                AddSectionLabel(root, "PROMOTION (OPTIONAL)");
+            }
+
+            var promotionOptions = BuildPromotionOptions();
 
             _promotionBox = new ComboBox
             {
@@ -287,6 +363,23 @@ namespace freshcrumbs.CRM.winforms.Forms
                 ApplyPointsRedemptionIfNeeded();
                 RecalculateDiscount(GetEffectiveTotal());
             };
+
+            if (_branchBox != null)
+            {
+                _branchBox.SelectedIndexChanged += (s, e) => RefreshPromotionOptions();
+            }
+            // A customer registered at another branch is not in this branch's list: Enter (or leaving the box)
+            // looks the exact code up company-wide, so the existing customer is used instead of a duplicate.
+            _customerCodeBox.KeyDown += async (s, e) =>
+            {
+                if (e.KeyCode == Keys.Enter)
+                {
+                    e.SuppressKeyPress = true;
+                    await LookupCustomerByCodeAsync();
+                }
+            };
+            _customerCodeBox.Leave += async (s, e) => await LookupCustomerByCodeAsync();
+
             _customerCodeBox.TextChanged += (s, e) =>
             {
                 var previousCustomer = _selectedCustomer;
@@ -305,7 +398,10 @@ namespace freshcrumbs.CRM.winforms.Forms
                 ApplyPointsRedemptionIfNeeded();
                 RecalculateDiscount(GetEffectiveTotal());
             };
-            root.Controls.Add(_promotionBox);
+            if (TenantCapabilities.CanUsePromotions)
+            {
+                root.Controls.Add(_promotionBox);
+            }
 
             _promotionMessageLabel = new Label
             {
@@ -315,7 +411,10 @@ namespace freshcrumbs.CRM.winforms.Forms
                 AutoSize = true,
                 Margin = new Padding(0, 0, 0, 10)
             };
-            root.Controls.Add(_promotionMessageLabel);
+            if (TenantCapabilities.CanUsePromotions)
+            {
+                root.Controls.Add(_promotionMessageLabel);
+            }
 
             _customerDiscountMessageLabel = new Label
             {
@@ -349,21 +448,32 @@ namespace freshcrumbs.CRM.winforms.Forms
             _totalDiscountLabel = CreateBreakdownValueLabel(12, Color.Firebrick);
             _finalAmountLabel = CreateBreakdownValueLabel(16, AccentColor);
 
-            AddBreakdownRow(breakdownTable, 0, "Subtotal", _totalAmountLabel);
-            AddBreakdownRow(breakdownTable, 1, "Customer Discount", _customerDiscountLabel);
-            AddBreakdownRow(breakdownTable, 2, "Promotion Discount", _discountLabel);
-            AddBreakdownRow(breakdownTable, 3, "Total Discount", _totalDiscountLabel);
-            AddBreakdownRow(breakdownTable, 4, "Final Amount", _finalAmountLabel);
+            int breakdownRow = 0;
+            AddBreakdownRow(breakdownTable, breakdownRow++, "Subtotal", _totalAmountLabel);
+            AddBreakdownRow(breakdownTable, breakdownRow++, "Customer Discount", _customerDiscountLabel);
+
+            if (TenantCapabilities.CanUsePromotions)
+            {
+                AddBreakdownRow(breakdownTable, breakdownRow++, "Promotion Discount", _discountLabel);
+                AddBreakdownRow(breakdownTable, breakdownRow++, "Total Discount", _totalDiscountLabel);
+            }
+
+            AddBreakdownRow(breakdownTable, breakdownRow++, "Final Amount", _finalAmountLabel);
+            breakdownTable.RowCount = breakdownRow;
             root.Controls.Add(breakdownTable);
 
-            _pointsUsedBox = AddNumericField(root, "POINTS USED");
+            _pointsUsedBox = TenantCapabilities.CanUseLoyalty
+                ? AddNumericField(root, "POINTS USED")
+                : new NumericUpDown { Minimum = 0, Maximum = 999999 };
 
             // Points Used is always system-calculated from the selected promotion.
             // Staff can never type or spin a value here.
             _pointsUsedBox.ReadOnly = true;
             _pointsUsedBox.Enabled = false;
 
-            _pointsEarnedBox = AddNumericField(root, "POINTS EARNED");
+            _pointsEarnedBox = TenantCapabilities.CanUseLoyalty
+                ? AddNumericField(root, "POINTS EARNED")
+                : new NumericUpDown { Minimum = 0, Maximum = 999999 };
 
             // Points Earned is always system-calculated from the Final Amount.
             // Staff can never type or spin a value here.
@@ -736,7 +846,9 @@ namespace freshcrumbs.CRM.winforms.Forms
 
             if (customer == null)
             {
-                _customerLookupLabel.Text = "Customer code not found.";
+                _customerLookupLabel.Text = _isEditMode || _companyId <= 0
+                    ? "Customer code not found."
+                    : "Customer code not found here. Press Enter to look it up.";
                 return;
             }
 
@@ -751,6 +863,51 @@ namespace freshcrumbs.CRM.winforms.Forms
 
             _selectedCustomer = customer;
             _customerNameBox.Text = $"{customer.FirstName} {customer.LastName}";
+        }
+
+        private async Task LookupCustomerByCodeAsync()
+        {
+            string code = _customerCodeBox.Text.Trim();
+
+            if (_isEditMode || _companyId <= 0 || _lookingUpCustomer || code.Length == 0 || _selectedCustomer != null)
+            {
+                return;
+            }
+
+            _lookingUpCustomer = true;
+
+            try
+            {
+                var found = await new ApiService().LookupCustomerByCodeAsync(_companyId, code);
+
+                if (IsDisposed)
+                {
+                    return;
+                }
+
+                if (found == null)
+                {
+                    _customerLookupLabel.Text = "Customer code not found.";
+                    return;
+                }
+
+                if (!_customers.Any(c => c.CustomerId == found.CustomerId))
+                {
+                    _customers.Add(found);
+                }
+
+                // Re-run the normal selection (balance, promotion and discount re-evaluated as usual).
+                _customerCodeBox.Text = string.Empty;
+                _customerCodeBox.Text = found.CustomerCode;
+            }
+            catch (Exception ex)
+            {
+                _customerLookupLabel.Text = BranchUi.GetMessage(ex);
+            }
+            finally
+            {
+                _lookingUpCustomer = false;
+            }
         }
 
         private void UpdateSelectedCustomerBalance()
@@ -816,6 +973,47 @@ namespace freshcrumbs.CRM.winforms.Forms
                 promotion.RequiredLoyaltyPoints);
         }
 
+        // The sale's branch as the form knows it (the API sets the real one): edit = the sale's branch,
+        // ADMIN = the selected branch, MANAGER / STAFF = their assigned branch, no branches = null.
+        private int? GetSaleBranchId()
+        {
+            if (_isEditMode)
+            {
+                return _editBranchId;
+            }
+
+            if (_branchBox != null)
+            {
+                return (_branchBox.SelectedItem as BranchOption)?.BranchId;
+            }
+
+            return _myBranch?.BranchId;
+        }
+
+        // Company-wide promotions plus those of the sale's branch (the API rejects any other).
+        private List<PromotionOption> BuildPromotionOptions()
+        {
+            int? branchId = GetSaleBranchId();
+
+            var options = new List<PromotionOption> { new PromotionOption { PromotionId = 0, PromotionName = "-- None --" } };
+            options.AddRange(_promotions
+                .Where(p => p.BranchId == null
+                            || (branchId != null && p.BranchId == branchId)
+                            || (_isEditMode && p.PromotionId == _editPromotionId))
+                .Select(p => new PromotionOption { PromotionId = p.PromotionId, PromotionName = p.PromotionName }));
+
+            return options;
+        }
+
+        private void RefreshPromotionOptions()
+        {
+            int selected = (int)(_promotionBox.SelectedValue ?? 0);
+            var options = BuildPromotionOptions();
+
+            _promotionBox.DataSource = options;
+            _promotionBox.SelectedValue = options.Any(o => o.PromotionId == selected) ? selected : 0;
+        }
+
         private decimal GetEffectiveTotal()
         {
             return _isEditMode ? Result.TotalAmount : GetCurrentTotal();
@@ -862,7 +1060,9 @@ namespace freshcrumbs.CRM.winforms.Forms
             {
                 if (_selectedCustomer == null)
                 {
-                    _errorLabel.Text = "Please enter a valid Customer Code.";
+                    _errorLabel.Text = _lookingUpCustomer
+                        ? "Looking up the customer code. Please try again in a moment."
+                        : "Please enter a valid Customer Code.";
                     return;
                 }
 
@@ -875,9 +1075,41 @@ namespace freshcrumbs.CRM.winforms.Forms
                 return;
             }
 
+            int? branchId = Result.BranchId;
+
+            if (!_isEditMode && TenantCapabilities.HasBranching)
+            {
+                if (AuthSession.IsAdmin)
+                {
+                    branchId = (_branchBox?.SelectedItem as BranchOption)?.BranchId;
+
+                    if (branchId == null)
+                    {
+                        _errorLabel.Text = "Please select the branch for this sale.";
+                        return;
+                    }
+                }
+                else
+                {
+                    if (_myBranch == null)
+                    {
+                        _errorLabel.Text = "You are not assigned to a branch. Ask your administrator to assign you before recording sales.";
+                        return;
+                    }
+
+                    branchId = _myBranch.BranchId;
+                }
+            }
+
             if (string.IsNullOrWhiteSpace(_paymentMethodBox.Text))
             {
                 _errorLabel.Text = "Please select a payment method.";
+                return;
+            }
+
+            if (_datePicker.Value.Date > DateTime.Today)
+            {
+                _errorLabel.Text = "The sale date cannot be in the future.";
                 return;
             }
 
@@ -922,7 +1154,12 @@ namespace freshcrumbs.CRM.winforms.Forms
                 appliedPromotion,
                 out _);
 
+            int? originalPromotionId = Result.PromotionId;
+            int originalPointsUsed = Result.PointsUsed;
+            int originalPointsEarned = Result.PointsEarned;
+
             Result.CustomerId = customerId;
+            Result.BranchId = branchId;
             Result.PromotionId = promotionId == 0 ? null : promotionId;
             Result.TransactionDate = _datePicker.Value;
             Result.TotalAmount = totalAmount;
@@ -935,6 +1172,18 @@ namespace freshcrumbs.CRM.winforms.Forms
             Result.FinalAmount = totalAmount - discountAmount - customerDiscountAmount;
             // Never read Points Earned back from the control; derive it from the rule.
             Result.PointsEarned = CalculatePointsEarned(Result.FinalAmount);
+
+            if (!TenantCapabilities.CanUsePromotions)
+            {
+                Result.PromotionId = _isEditMode ? originalPromotionId : null;
+            }
+
+            if (!TenantCapabilities.CanUseLoyalty)
+            {
+                Result.PointsUsed = _isEditMode ? originalPointsUsed : 0;
+                Result.PointsEarned = _isEditMode ? originalPointsEarned : 0;
+            }
+
             Result.PaymentMethod = _paymentMethodBox.Text;
             // New transactions are always Completed. Status is only user-editable
             // in edit mode, where it also carries Cancelled for the existing
@@ -945,6 +1194,12 @@ namespace freshcrumbs.CRM.winforms.Forms
 
             DialogResult = DialogResult.OK;
             Close();
+        }
+
+        private class BranchOption
+        {
+            public int? BranchId { get; set; }
+            public string Name { get; set; } = string.Empty;
         }
 
         private class PromotionOption

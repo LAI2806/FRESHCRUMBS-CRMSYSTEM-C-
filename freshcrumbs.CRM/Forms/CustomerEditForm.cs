@@ -43,8 +43,10 @@ namespace freshcrumbs.CRM.winforms.Forms
         }
 
         private readonly List<EligibilityRow> _eligibilityRows = new();
+        private bool _eligibilityOnly;
 
-        public CustomerEditForm(CustomerModel? existingCustomer, string suggestedCode = "")
+        // eligibilityOnly: STAFF can add/edit Senior/PWD eligibility; every other field is read-only.
+        public CustomerEditForm(CustomerModel? existingCustomer, string suggestedCode = "", bool eligibilityOnly = false)
         {
             _isEditMode = existingCustomer != null;
 
@@ -109,6 +111,20 @@ namespace freshcrumbs.CRM.winforms.Forms
             }
 
             UpdateEligibilityRowStates();
+
+            if (eligibilityOnly && existingCustomer != null)
+            {
+                _eligibilityOnly = true;
+                Text = "Senior/PWD Eligibility";
+
+                foreach (var box in new[] { _codeBox, _firstNameBox, _lastNameBox, _emailBox, _contactBox, _addressBox })
+                {
+                    box.ReadOnly = true;
+                }
+
+                _loyaltyPointsBox.Enabled = false;
+                _statusBox.Enabled = false;
+            }
         }
 
         private void InitializeForm()
@@ -154,6 +170,14 @@ namespace freshcrumbs.CRM.winforms.Forms
             _contactBox = AddField(root, "Contact No.");
             _addressBox = AddField(root, "Address");
 
+            // Same limits as the database (the API checks them again).
+            _codeBox.MaxLength = 50;
+            _firstNameBox.MaxLength = 100;
+            _lastNameBox.MaxLength = 100;
+            _emailBox.MaxLength = 150;
+            _contactBox.MaxLength = 20;
+            _addressBox.MaxLength = 300;
+
             var discountLabel = new Label
             {
                 Text = "DISCOUNT ELIGIBILITY",
@@ -179,7 +203,7 @@ namespace freshcrumbs.CRM.winforms.Forms
                 Enabled = false
             };
 
-            if (_isEditMode)
+            if (_isEditMode && TenantCapabilities.CanUseLoyalty)
             {
                 var loyaltyLabel = new Label
                 {
@@ -298,6 +322,7 @@ namespace freshcrumbs.CRM.winforms.Forms
 
             var idBox = new TextBox
             {
+                MaxLength = 50,
                 Width = 150,
                 Height = 30,
                 Font = new Font("Segoe UI", 9.5f),
@@ -384,6 +409,47 @@ namespace freshcrumbs.CRM.winforms.Forms
             return textBox;
         }
 
+        private bool ValidateCustomerFields(string code, string firstName, string lastName, string email, string contact)
+        {
+            if (!ValidationHelper.IsRequired(code))
+            {
+                ShowFieldError(_codeBox, "Customer Code is required.");
+                return false;
+            }
+
+            if (!ValidationHelper.IsRequired(firstName))
+            {
+                ShowFieldError(_firstNameBox, "First Name is required.");
+                return false;
+            }
+
+            if (!ValidationHelper.IsRequired(lastName))
+            {
+                ShowFieldError(_lastNameBox, "Last Name is required.");
+                return false;
+            }
+
+            if (!string.IsNullOrEmpty(contact) && !ValidationHelper.IsValidPhilippineMobileNumber(contact))
+            {
+                ShowFieldError(_contactBox, "Contact number must be exactly 11 digits (e.g. 09171234567).");
+                return false;
+            }
+
+            if (!string.IsNullOrEmpty(email) && !ValidationHelper.IsValidEmail(email))
+            {
+                ShowFieldError(_emailBox, "Please enter a valid email address.");
+                return false;
+            }
+
+            if (_isEditMode && !ValidationHelper.IsValidSelection(_statusBox))
+            {
+                ShowFieldError(_statusBox, "Please select a status.");
+                return false;
+            }
+
+            return true;
+        }
+
         private void SaveButton_Click(object? sender, EventArgs e)
         {
             _errorLabel.Text = "";
@@ -396,39 +462,10 @@ namespace freshcrumbs.CRM.winforms.Forms
             string contact = _contactBox.Text.Trim();
             string address = _addressBox.Text.Trim();
 
-            if (!ValidationHelper.IsRequired(code))
+            // Eligibility-only: the other fields are read-only and are not sent, so they are not validated
+            // (an older record with, for example, an old-format contact number must not block the eligibility change).
+            if (!_eligibilityOnly && !ValidateCustomerFields(code, firstName, lastName, email, contact))
             {
-                ShowFieldError(_codeBox, "Customer Code is required.");
-                return;
-            }
-
-            if (!ValidationHelper.IsRequired(firstName))
-            {
-                ShowFieldError(_firstNameBox, "First Name is required.");
-                return;
-            }
-
-            if (!ValidationHelper.IsRequired(lastName))
-            {
-                ShowFieldError(_lastNameBox, "Last Name is required.");
-                return;
-            }
-
-            if (!string.IsNullOrEmpty(contact) && !ValidationHelper.IsValidPhilippineMobileNumber(contact))
-            {
-                ShowFieldError(_contactBox, "Contact number must be exactly 11 digits (e.g. 09171234567).");
-                return;
-            }
-
-            if (!string.IsNullOrEmpty(email) && !ValidationHelper.IsValidEmail(email))
-            {
-                ShowFieldError(_emailBox, "Please enter a valid email address.");
-                return;
-            }
-
-            if (_isEditMode && !ValidationHelper.IsValidSelection(_statusBox))
-            {
-                ShowFieldError(_statusBox, "Please select a status.");
                 return;
             }
 

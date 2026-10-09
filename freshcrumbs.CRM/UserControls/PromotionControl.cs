@@ -36,6 +36,8 @@ namespace freshcrumbs.CRM.winforms.UserControls
         private Button _nextPageButton = null!;
 
         private List<PromotionModel> _promotions = new();
+        private List<BranchModel>? _branches;
+        private string? _myBranchName;
         private List<PromotionModel> _filteredPromotions = new();
         private int _currentPage = 1;
 
@@ -332,7 +334,33 @@ namespace freshcrumbs.CRM.winforms.UserControls
 
         private async void PromotionControl_Load(object? sender, EventArgs e)
         {
+            await LoadBranchChoicesAsync();
             await LoadPromotionsAsync();
+        }
+
+        // PREMIUM: ADMIN picks the promotion's branch (or All Branches); a MANAGER's promotions are always their own branch's.
+        private async Task LoadBranchChoicesAsync()
+        {
+            if (!TenantCapabilities.HasBranching)
+            {
+                return;
+            }
+
+            try
+            {
+                if (AuthSession.IsAdmin)
+                {
+                    _branches = await _apiService.GetBranchesAsync(_companyId);
+                }
+                else
+                {
+                    _myBranchName = (await _apiService.GetMyBranchAsync(_companyId))?.BranchName ?? "Not assigned to a branch";
+                }
+            }
+            catch (Exception ex)
+            {
+                _statusLabel.Text = $"Failed to load branches: {BranchUi.GetMessage(ex)}";
+            }
         }
 
         private async Task LoadPromotionsAsync()
@@ -351,7 +379,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
             }
             catch (Exception ex)
             {
-                _statusLabel.Text = $"Failed to load promotions: {ex.Message}";
+                _statusLabel.Text = $"Failed to load promotions: {ErrorMessageHelper.GetFriendlyMessage(ex)}";
             }
         }
 
@@ -407,6 +435,21 @@ namespace freshcrumbs.CRM.winforms.UserControls
             SetColumnHeader("StartDate", "Start Date");
             SetColumnHeader("EndDate", "End Date");
             SetColumnHeader("Status", "Status");
+            SetColumnHeader("BranchName", "Branch");
+
+            foreach (var hidden in new[] { "BranchId", "CanManage" })
+            {
+                if (_promotionGrid.Columns[hidden] != null)
+                {
+                    _promotionGrid.Columns[hidden].Visible = false;
+                }
+            }
+
+            if (_promotionGrid.Columns["BranchName"] != null)
+            {
+                _promotionGrid.Columns["BranchName"].Visible = TenantCapabilities.HasBranching;
+                _promotionGrid.Columns["BranchName"].DefaultCellStyle.NullValue = "All Branches";
+            }
 
             if (_promotionGrid.Columns["StartDate"] != null)
             {
@@ -435,11 +478,12 @@ namespace freshcrumbs.CRM.winforms.UserControls
         {
             bool hasSelection = _promotionGrid.SelectedRows.Count > 0;
             bool isInactive = hasSelection && GetSelectedStatus() == "Inactive";
+            bool canManage = hasSelection && _promotionGrid.SelectedRows[0].DataBoundItem is PromotionModel { CanManage: true };
 
-            _editButton.Enabled = hasSelection && !isInactive;
-            _deleteButton.Enabled = hasSelection && !isInactive;
+            _editButton.Enabled = canManage && !isInactive;
+            _deleteButton.Enabled = canManage && !isInactive;
             _reactivateButton.Visible = isInactive;
-            _reactivateButton.Enabled = isInactive;
+            _reactivateButton.Enabled = canManage && isInactive;
         }
 
         private string? GetSelectedStatus()
@@ -455,7 +499,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
 
         private async void AddButton_Click(object? sender, EventArgs e)
         {
-            using var form = new PromotionEditForm(null);
+            using var form = new PromotionEditForm(null, _branches, _myBranchName);
             if (form.ShowDialog(this) != DialogResult.OK)
             {
                 return;
@@ -469,7 +513,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
             }
             catch (Exception ex)
             {
-                _statusLabel.Text = $"Failed to create promotion: {ex.Message}";
+                _statusLabel.Text = $"Failed to create promotion: {ErrorMessageHelper.GetFriendlyMessage(ex)}";
             }
         }
 
@@ -481,7 +525,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
                 return;
             }
 
-            using var form = new PromotionEditForm(selectedPromotion);
+            using var form = new PromotionEditForm(selectedPromotion, _branches, _myBranchName);
             if (form.ShowDialog(this) != DialogResult.OK)
             {
                 return;
@@ -495,7 +539,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
             }
             catch (Exception ex)
             {
-                _statusLabel.Text = $"Failed to update promotion: {ex.Message}";
+                _statusLabel.Text = $"Failed to update promotion: {ErrorMessageHelper.GetFriendlyMessage(ex)}";
             }
         }
 
@@ -526,7 +570,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
             }
             catch (Exception ex)
             {
-                _statusLabel.Text = $"Failed to deactivate promotion: {ex.Message}";
+                _statusLabel.Text = $"Failed to deactivate promotion: {ErrorMessageHelper.GetFriendlyMessage(ex)}";
             }
         }
 
@@ -546,7 +590,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
             }
             catch (Exception ex)
             {
-                _statusLabel.Text = $"Failed to reactivate promotion: {ex.Message}";
+                _statusLabel.Text = $"Failed to reactivate promotion: {ErrorMessageHelper.GetFriendlyMessage(ex)}";
             }
         }
     }

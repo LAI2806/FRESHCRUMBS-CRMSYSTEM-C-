@@ -1,5 +1,6 @@
 ﻿using System.Security.Claims;
 using freshcrumbs.CRM.api.Services;
+using freshcrumbs.CRM.domain.entities;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
@@ -13,6 +14,18 @@ namespace freshcrumbs.CRM.api.Authorization
     {
         private const string SubscriptionSegment = "subscription";
         private const string TermsSegment = "terms";
+        private const string SyncSegment = "sync";
+
+        // Tokens issued by api/auth/sync-token carry purpose=sync and may only call api/tenant/{id}/sync/*.
+        public const string PurposeClaim = "purpose";
+        public const string SyncPurpose = "sync";
+
+        // On tokens issued while the account still uses its temporary password. Only api/auth/change-password accepts them.
+        public const string PasswordChangeClaim = "pwd_change";
+
+        // HttpContext.Items key holding the caller's normalized tenant role (null when it is not a valid role).
+        public const string RoleItemKey = "TenantRole";
+        public const string FeaturesItemKey = "TenantFeatures";
 
         private readonly IAuthorizationService _authorizationService;
         private readonly ISubscriptionService _subscriptions;
@@ -61,16 +74,42 @@ namespace freshcrumbs.CRM.api.Authorization
                 return;
             }
 
-            // The account must still exist, be active, and belong to this company (not just hold a valid token).
-            var userError = await _subscriptions.CheckUserAsync(user.FindFirstValue(ClaimTypes.NameIdentifier), companyId);
+            // A sync-only token (long-lived, issued for background synchronization) can never open any other area,
+            // except the read-only subscription snapshot the desktop uses to renew its offline grace period.
+            var isSyncArea = parts.Length > 1 && string.Equals(parts[1], SyncSegment, StringComparison.OrdinalIgnoreCase);
+            var isSnapshot = parts.Length > 2
+                && string.Equals(parts[1], SubscriptionSegment, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(parts[2], "snapshot", StringComparison.OrdinalIgnoreCase);
 
-            if (userError != null)
+            if (string.Equals(user.FindFirst(PurposeClaim)?.Value, SyncPurpose, StringComparison.Ordinal)
+                && !isSyncArea && !isSnapshot)
             {
-                context.Result = Denied(StatusCodes.Status403Forbidden, "UserInactive", userError);
+                context.Result = Denied(StatusCodes.Status403Forbidden, "WrongTokenType", "This token can only be used for synchronization.");
                 return;
             }
 
+            // Temporary-password session: only the read-only snapshot the desktop needs to finish signing in.
+            if (user.HasClaim(c => c.Type == PasswordChangeClaim) && !isSnapshot)
+            {
+                context.Result = Denied(StatusCodes.Status403Forbidden, "PasswordChangeRequired", "Set your own password before using FreshCrumbs.");
+                return;
+            }
+
+            // The account must still exist, be active, and belong to this company (not just hold a valid token).
+            var userCheck = await _subscriptions.CheckTenantUserAsync(user.FindFirstValue(ClaimTypes.NameIdentifier), companyId);
+
+            if (userCheck.Error != null)
+            {
+                context.Result = Denied(StatusCodes.Status403Forbidden, "UserInactive", userCheck.Error);
+                return;
+            }
+
+            // The role comes from the account in the database, never from the client.
+            var role = TenantRoles.Normalize(userCheck.Role);
+            httpContext.Items[RoleItemKey] = role;
+
             var segment = parts.Length > 1 ? parts[1] : null;
+            var subSegment = parts.Length > 2 ? parts[2] : null;
 
             // The tenant must always be able to read its own subscription state (to see why access is denied).
             if (string.Equals(segment, SubscriptionSegment, StringComparison.OrdinalIgnoreCase))
@@ -78,7 +117,8 @@ namespace freshcrumbs.CRM.api.Authorization
                 return;
             }
 
-            var access = await _subscriptions.CheckAccessAsync(companyId, TenantFeatureMap.RequiredFeature(segment));
+            var access = await _subscriptions.CheckAccessAsync(companyId, TenantFeatureMap.RequiredFeature(segment, subSegment));
+            httpContext.Items[FeaturesItemKey] = (access.Subscription?.FeatureList ?? new List<string>()).ToList();
 
             if (!access.Allowed)
             {
@@ -90,6 +130,46 @@ namespace freshcrumbs.CRM.api.Authorization
             if (string.Equals(segment, TermsSegment, StringComparison.OrdinalIgnoreCase))
             {
                 return;
+            }
+
+            // A tenant account must hold one of ADMIN / MANAGER / STAFF to use any tenant area.
+            if (role == null)
+            {
+                context.Result = Denied(
+                    StatusCodes.Status403Forbidden,
+                    "InvalidRole",
+                    "This account does not have a valid role (ADMIN, MANAGER or STAFF). Please contact your administrator.");
+                return;
+            }
+
+            // Action permissions: the subscription must provide the feature AND the role must allow the action.
+            // The feature is checked first so a role can never stand in for a missing subscription feature.
+            var requiredPermissions = context.ActionDescriptor.EndpointMetadata?
+                .OfType<RequireTenantPermissionAttribute>()
+                .Select(a => a.Permission)
+                ?? Enumerable.Empty<string>();
+
+            foreach (var permission in requiredPermissions)
+            {
+                if (!TenantPermissions.IsFeatureAvailable(permission, access.Subscription?.FeatureList ?? Array.Empty<string>()))
+                {
+                    var feature = TenantPermissions.RequiredFeature(permission);
+
+                    context.Result = Denied(
+                        StatusCodes.Status403Forbidden,
+                        "FeatureNotIncluded",
+                        $"Your current plan ({access.Subscription?.PlanName}) does not include {(feature == null ? "this feature" : PlanFeatureKeys.DisplayName(feature))}.");
+                    return;
+                }
+
+                if (!TenantPermissions.IsRoleAllowed(permission, role))
+                {
+                    context.Result = Denied(
+                        StatusCodes.Status403Forbidden,
+                        "RoleNotAllowed",
+                        $"Your role ({role}) is not allowed to perform this action.");
+                    return;
+                }
             }
 
             var pendingTerms = await _terms.GetPendingForCompanyAsync(companyId);

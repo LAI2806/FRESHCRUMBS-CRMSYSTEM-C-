@@ -35,16 +35,45 @@ namespace freshcrumbs.CRM.winforms.UserControls
             Color.FromArgb(240, 210, 170)
         };
 
-        private static readonly string[] TabNames =
+        private static List<string> GetVisibleTabs()
         {
-            "Overview",
-            "Sales",
-            "Customers",
-            "Products and Inventory",
-            "Promotions and Discounts",
-            "Loyalty",
-            "Feedback and Inquiries"
-        };
+            bool management = TenantCapabilities.CanViewManagementDashboard;
+            var tabs = new List<string> { "Overview" };
+
+            if (management)
+            {
+                tabs.Add("Sales");
+                tabs.Add("Customers");
+            }
+
+            tabs.Add("Products and Inventory");
+
+            if (TenantCapabilities.CanViewRetentionDashboard)
+            {
+                tabs.Add("Promotions and Discounts");
+                tabs.Add("Loyalty");
+            }
+
+            if (management && (TenantCapabilities.CanGenerateReport("feedback") || TenantCapabilities.CanGenerateReport("inquiries")))
+            {
+                tabs.Add("Feedback and Inquiries");
+            }
+
+            if (TenantCapabilities.CanViewCompanyDashboard)
+            {
+                tabs.Add("Company");
+            }
+
+            if (TenantCapabilities.CanViewBranchBI)
+            {
+                tabs.Add("Branches");
+            }
+
+            return tabs;
+        }
+
+        private readonly List<string> _tabNames;
+        private readonly bool _operationalReports;
 
         private readonly ApiService _apiService;
         private readonly int _companyId;
@@ -64,11 +93,14 @@ namespace freshcrumbs.CRM.winforms.UserControls
         private bool _suppressFilterEvents;
         private int _loadVersion;
 
-        public DashboardControl(int companyId, Action<string>? navigateToModule = null)
+        // operationalReports: the STAFF Reports module (read-only operational reports) on the dashboard layout.
+        public DashboardControl(int companyId, Action<string>? navigateToModule = null, bool operationalReports = false)
         {
             _companyId = companyId;
             _navigateToModule = navigateToModule;
             _apiService = new ApiService();
+            _operationalReports = operationalReports;
+            _tabNames = operationalReports ? GetOperationalTabs() : GetVisibleTabs();
 
             InitializeLayout();
 
@@ -118,7 +150,9 @@ namespace freshcrumbs.CRM.winforms.UserControls
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 46f));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
 
-            layout.Controls.Add(CreateHeaderPanel(), 0, 0);
+            layout.Controls.Add(_operationalReports
+                ? CreateHeaderPanel("Reports", "Daily operations: sales, customers and service activity for the selected period.")
+                : CreateHeaderPanel("Dashboard", "Business analytics and key performance at a glance."), 0, 0);
             layout.Controls.Add(CreateFilterRow(), 0, 1);
 
             _tabs = new TabControl
@@ -129,7 +163,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
                 Padding = new Point(14, 6)
             };
 
-            foreach (string name in TabNames)
+            foreach (string name in _tabNames)
             {
                 _tabs.TabPages.Add(CreateTabPage(name));
             }
@@ -153,7 +187,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
             _endPicker.ValueChanged += DatePicker_ValueChanged;
         }
 
-        private static Panel CreateHeaderPanel()
+        private static Panel CreateHeaderPanel(string title, string subtitle)
         {
             var panel = new Panel
             {
@@ -163,7 +197,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
 
             panel.Controls.Add(new Label
             {
-                Text = "Dashboard",
+                Text = title,
                 Font = new Font("Segoe UI", 20, FontStyle.Bold),
                 ForeColor = TextDark,
                 AutoSize = true,
@@ -172,7 +206,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
 
             panel.Controls.Add(new Label
             {
-                Text = "Business analytics and key performance at a glance.",
+                Text = subtitle,
                 Font = new Font("Segoe UI", 10),
                 ForeColor = LabelGray,
                 AutoSize = true,
@@ -222,7 +256,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
 
             _loadingLabel = new Label
             {
-                Text = "Loading dashboard...",
+                Text = _operationalReports ? "Loading reports..." : "Loading dashboard...",
                 Font = new Font("Segoe UI", 9, FontStyle.Italic),
                 ForeColor = LabelGray,
                 AutoSize = true,
@@ -321,7 +355,8 @@ namespace freshcrumbs.CRM.winforms.UserControls
                 return false;
             }
 
-            if ((end - start).TotalDays > MaxRangeDays)
+            // The API counts the end day too, so the same span is compared here.
+            if ((end.Date - start.Date).TotalDays >= MaxRangeDays)
             {
                 _statusLabel.Text = "The selected date range cannot exceed 10 years.";
                 return false;
@@ -355,22 +390,46 @@ namespace freshcrumbs.CRM.winforms.UserControls
             }
 
             int version = ++_loadVersion;
-            _loadingLabel.Text = "Loading dashboard...";
+            _loadingLabel.Text = _operationalReports ? "Loading reports..." : "Loading dashboard...";
 
             try
             {
+                if (_operationalReports)
+                {
+                    var report = await _apiService.GetOperationalReportAsync(_companyId, startDate, endDate);
+
+                    if (version != _loadVersion || IsDisposed)
+                    {
+                        return;
+                    }
+
+                    BuildOperationalReports(report);
+                    _loadingLabel.Text = "";
+                    return;
+                }
+
+                // STAFF dashboard: the operational figures of the same period add customer and service activity.
+                bool staffView = IsStaffDashboard();
+                var operationsTask = staffView
+                    ? _apiService.GetOperationalReportAsync(_companyId, startDate, endDate)
+                    : Task.FromResult(new OperationalReportModel());
+
                 var dashboardTask = _apiService.GetDashboardAsync(_companyId);
                 var overviewTask = _apiService.GetReportsOverviewAsync(_companyId, null, null, startDate, endDate);
                 var chartsTask = _apiService.GetReportChartsAsync(_companyId, null, null, startDate, endDate);
+                var branchesTask = TenantCapabilities.CanViewBranchBI
+                    ? _apiService.GetBranchDashboardAsync(_companyId, startDate, endDate)
+                    : Task.FromResult(new BranchDashboardModel());
 
-                await Task.WhenAll(dashboardTask, overviewTask, chartsTask);
+                await Task.WhenAll(dashboardTask, overviewTask, chartsTask, branchesTask, operationsTask);
 
                 if (version != _loadVersion || IsDisposed)
                 {
                     return;
                 }
 
-                BuildDashboard(await dashboardTask, await overviewTask, await chartsTask);
+                BuildDashboard(await dashboardTask, await overviewTask, await chartsTask, await branchesTask,
+                    staffView ? await operationsTask : null);
 
                 _loadingLabel.Text = "";
             }
@@ -382,11 +441,19 @@ namespace freshcrumbs.CRM.winforms.UserControls
                 }
 
                 _loadingLabel.Text = "";
-                _statusLabel.Text = $"Unable to load dashboard data: {ErrorMessageHelper.GetFriendlyMessage(ex)}";
+                _statusLabel.Text = _operationalReports
+                    ? $"Unable to load reports: {BranchUi.GetMessage(ex)}"
+                    : $"Unable to load dashboard data: {ErrorMessageHelper.GetFriendlyMessage(ex)}";
             }
         }
 
-        private void BuildDashboard(DashboardModel dashboard, ReportsOverviewModel overview, ReportChartsModel charts)
+        private static bool IsStaffDashboard()
+        {
+            return !TenantCapabilities.CanViewManagementDashboard && TenantCapabilities.CanViewOperationalReports;
+        }
+
+        private void BuildDashboard(DashboardModel dashboard, ReportsOverviewModel overview, ReportChartsModel charts, BranchDashboardModel branchData,
+            OperationalReportModel? operations)
         {
             SuspendLayout();
 
@@ -395,13 +462,39 @@ namespace freshcrumbs.CRM.winforms.UserControls
                 ClearRoot(_tabRoots[i]);
             }
 
-            BuildOverviewTab(_tabRoots[0], dashboard, overview, charts);
-            BuildSalesTab(_tabRoots[1], overview, charts);
-            BuildCustomersTab(_tabRoots[2], dashboard, overview, charts);
-            BuildProductsTab(_tabRoots[3], dashboard, overview, charts);
-            BuildPromotionsTab(_tabRoots[4], overview, charts);
-            BuildLoyaltyTab(_tabRoots[5], dashboard, overview, charts);
-            BuildFeedbackTab(_tabRoots[6], overview, charts);
+            for (int i = 0; i < _tabNames.Count; i++)
+            {
+                switch (_tabNames[i])
+                {
+                    case "Overview":
+                        BuildOverviewTab(_tabRoots[i], dashboard, overview, charts, operations);
+                        break;
+                    case "Sales":
+                        BuildSalesTab(_tabRoots[i], overview, charts);
+                        break;
+                    case "Customers":
+                        BuildCustomersTab(_tabRoots[i], dashboard, overview, charts);
+                        break;
+                    case "Products and Inventory":
+                        BuildProductsTab(_tabRoots[i], dashboard, overview, charts);
+                        break;
+                    case "Promotions and Discounts":
+                        BuildPromotionsTab(_tabRoots[i], overview, charts);
+                        break;
+                    case "Loyalty":
+                        BuildLoyaltyTab(_tabRoots[i], dashboard, overview, charts);
+                        break;
+                    case "Feedback and Inquiries":
+                        BuildFeedbackTab(_tabRoots[i], overview, charts);
+                        break;
+                    case "Company":
+                        BuildCompanyTab(_tabRoots[i], dashboard);
+                        break;
+                    case "Branches":
+                        BuildBranchesTab(_tabRoots[i], branchData);
+                        break;
+                }
+            }
 
             for (int i = 0; i < _tabRoots.Count; i++)
             {
@@ -430,64 +523,168 @@ namespace freshcrumbs.CRM.winforms.UserControls
 
         // ---------------------------------------------------------------- tabs
 
-        private void BuildOverviewTab(TableLayoutPanel root, DashboardModel dashboard, ReportsOverviewModel overview, ReportChartsModel charts)
+        private void BuildOverviewTab(TableLayoutPanel root, DashboardModel dashboard, ReportsOverviewModel overview, ReportChartsModel charts,
+            OperationalReportModel? operations)
         {
+            bool management = TenantCapabilities.CanViewManagementDashboard;
+            bool retention = TenantCapabilities.CanViewRetentionDashboard;
+            bool feedbackVisible = management && TenantCapabilities.CanGenerateReport("feedback");
+            bool inquiriesVisible = management && TenantCapabilities.CanGenerateReport("inquiries");
+            bool promotionsVisible = retention || TenantCapabilities.CanUsePromotions;
+
             AddSectionLabel(root, "TODAY");
-            AddKpiRow(root,
-                new Kpi("TOTAL CUSTOMERS", FormatCount(dashboard.ActiveCustomers), "customers"),
-                new Kpi("ACTIVE PRODUCTS", FormatCount(dashboard.ActiveProducts), "products"),
-                new Kpi("TODAY'S SALES", FormatPeso(dashboard.TodaysSales), "sales"),
-                new Kpi("LOW STOCK", FormatCount(dashboard.LowStockCount), "products", dashboard.LowStockCount > 0));
 
-            AddSectionLabel(root, "SALES (SELECTED PERIOD)");
-            AddKpiRow(root,
-                BuildTotalSalesKpi(overview),
-                new Kpi("TRANSACTIONS", FormatCount(overview.TransactionCount), "sales"),
-                new Kpi("AVERAGE TRANSACTION", FormatPeso(overview.AverageTransaction), "sales"),
-                new Kpi("TOTAL PRODUCTS SOLD", FormatCount(overview.TotalProductsSold), "sales"));
+            if (operations != null)
+            {
+                // STAFF: today's work first, then the selected period's customer and service activity.
+                AddKpiRow(root,
+                    new Kpi("TODAY'S SALES", FormatPeso(dashboard.TodaysSales), "sales"),
+                    new Kpi("TODAY'S TRANSACTIONS", FormatCount(dashboard.TodaysTransactions), "sales"),
+                    new Kpi("TOTAL CUSTOMERS", FormatCount(dashboard.ActiveCustomers), "customers"),
+                    new Kpi("LOW STOCK", FormatCount(dashboard.LowStockCount), "products", dashboard.LowStockCount > 0));
 
-            AddSectionLabel(root, "CUSTOMERS AND LOYALTY");
-            AddKpiRow(root,
-                new Kpi("NEW CUSTOMERS (LAST 30 DAYS)", FormatCount(overview.NewCustomersLast30Days), "customers"),
-                new Kpi("REPEAT CUSTOMER RATE", FormatPercent(overview.RepeatCustomerRatePercent), "customers"),
-                new Kpi("TOTAL EARNED POINTS", FormatCount(overview.TotalEarnedPoints), "loyalty"),
-                new Kpi("TOTAL USED POINTS", FormatCount(overview.TotalUsedPoints), "loyalty"));
+                AddSectionLabel(root, "SELECTED PERIOD");
+                AddKpiRow(root,
+                    new Kpi("TRANSACTIONS", FormatCount(operations.Sales.Transactions), "sales"),
+                    new Kpi("CUSTOMERS WHO BOUGHT", FormatCount(operations.Customers.ActiveCustomers), "customers"),
+                    new Kpi("NEW CUSTOMERS", FormatCount(operations.Customers.NewCustomers), "customers"));
+            }
+            else
+            {
+                AddKpiRow(root,
+                    new Kpi("TOTAL CUSTOMERS", FormatCount(dashboard.ActiveCustomers), "customers"),
+                    new Kpi("ACTIVE PRODUCTS", FormatCount(dashboard.ActiveProducts), "products"),
+                    new Kpi("TODAY'S SALES", FormatPeso(dashboard.TodaysSales), "sales"),
+                    new Kpi("LOW STOCK", FormatCount(dashboard.LowStockCount), "products", dashboard.LowStockCount > 0));
+            }
 
-            AddSectionLabel(root, "PROMOTIONS AND SERVICE");
-            AddKpiRow(root,
-                new Kpi("ACTIVE PROMOTIONS", FormatCount(overview.TotalActivePromotions), "promotions"),
-                new Kpi("RESOLUTION RATE", FormatPercent(overview.ResolutionRatePercent), "feedback"),
-                new Kpi("RESPONSE RATE", FormatPercent(overview.ResponseRatePercent), "inquiries"),
-                new Kpi("RESOLVED COMPLAINTS", FormatCount(overview.TotalResolvedComplaints), "feedback"));
+            if (management)
+            {
+                AddSectionLabel(root, "SALES (SELECTED PERIOD)");
+                AddKpiRow(root,
+                    BuildTotalSalesKpi(overview),
+                    new Kpi("TRANSACTIONS", FormatCount(overview.TransactionCount), "sales"),
+                    new Kpi("AVERAGE TRANSACTION", FormatPeso(overview.AverageTransaction), "sales"),
+                    new Kpi("TOTAL PRODUCTS SOLD", FormatCount(overview.TotalProductsSold), "sales"));
 
-            AddSectionLabel(root, "ANALYTICS");
-            AddCardGrid(root,
-                ChartItem("Sales Trend (Selected Period)",
+                var customerKpis = new List<Kpi>
+                {
+                    new Kpi("NEW CUSTOMERS (LAST 30 DAYS)", FormatCount(overview.NewCustomersLast30Days), "customers")
+                };
+
+                if (retention)
+                {
+                    customerKpis.Add(new Kpi("REPEAT CUSTOMER RATE", FormatPercent(overview.RepeatCustomerRatePercent), "customers"));
+                    customerKpis.Add(new Kpi("TOTAL EARNED POINTS", FormatCount(overview.TotalEarnedPoints), "loyalty"));
+                    customerKpis.Add(new Kpi("TOTAL USED POINTS", FormatCount(overview.TotalUsedPoints), "loyalty"));
+                }
+
+                AddSectionLabel(root, retention ? "CUSTOMERS AND LOYALTY" : "CUSTOMERS");
+                AddKpiRow(root, customerKpis.ToArray());
+            }
+
+            var serviceKpis = new List<Kpi>();
+
+            if (promotionsVisible)
+            {
+                serviceKpis.Add(new Kpi("ACTIVE PROMOTIONS", FormatCount(overview.TotalActivePromotions), "promotions"));
+            }
+
+            if (feedbackVisible)
+            {
+                serviceKpis.Add(new Kpi("RESOLUTION RATE", FormatPercent(overview.ResolutionRatePercent), "feedback"));
+            }
+
+            if (inquiriesVisible)
+            {
+                serviceKpis.Add(new Kpi("RESPONSE RATE", FormatPercent(overview.ResponseRatePercent), "inquiries"));
+            }
+
+            if (feedbackVisible)
+            {
+                serviceKpis.Add(new Kpi("RESOLVED COMPLAINTS", FormatCount(overview.TotalResolvedComplaints), "feedback"));
+            }
+
+            if (operations?.Feedback != null)
+            {
+                serviceKpis.Add(new Kpi("FEEDBACK NOT YET RESOLVED", FormatCount(operations.Feedback.Open), "feedback", operations.Feedback.Open > 0));
+            }
+
+            if (operations?.Inquiries != null)
+            {
+                serviceKpis.Add(new Kpi("INQUIRIES AWAITING RESPONSE", FormatCount(operations.Inquiries.Pending), "inquiries", operations.Inquiries.Pending > 0));
+            }
+
+            if (operations?.Loyalty != null)
+            {
+                serviceKpis.Add(new Kpi("POINTS EARNED", FormatCount(operations.Loyalty.PointsEarned), "loyalty"));
+            }
+
+            if (operations != null && serviceKpis.Count > 0)
+            {
+                AddSectionLabel(root, "SERVICE AND ACTIVITY (SELECTED PERIOD)");
+                AddKpiRow(root, serviceKpis.ToArray());
+            }
+            else if (serviceKpis.Count > 0)
+            {
+                bool service = feedbackVisible || inquiriesVisible;
+                AddSectionLabel(root, promotionsVisible && service ? "PROMOTIONS AND SERVICE" : promotionsVisible ? "PROMOTIONS" : "SERVICE");
+                AddKpiRow(root, serviceKpis.ToArray());
+            }
+
+            var cards = new List<CardItem>();
+
+            if (management)
+            {
+                cards.Add(ChartItem("Sales Trend (Selected Period)",
                     BuildLineChart("Date", "Final Amount", true, true, ("Sales", charts.SalesTrend, AccentColor)),
-                    "sales", 2),
-                new CardItem(BuildSalesOverviewCard(dashboard), 1),
-                new CardItem(BuildRecentSalesCard(dashboard), 1),
-                ChartItem("Top-Selling Products",
-                    BuildBarChart("Product", "Quantity Sold", charts.ProductPerformance, false, true), "products"),
-                ChartItem("Sales by Product Category",
-                    BuildDonutChart(charts.SalesByCategory, true), "products"),
-                ChartItem("Customer Growth Trend",
+                    "sales", 2));
+            }
+
+            cards.Add(new CardItem(BuildSalesOverviewCard(dashboard), 1));
+            cards.Add(new CardItem(BuildRecentSalesCard(dashboard), 1));
+
+            if (operations != null)
+            {
+                cards.Add(new CardItem(BuildRecentCustomersCard(operations.Customers), 1));
+            }
+
+            if (management)
+            {
+                cards.Add(ChartItem("Top-Selling Products",
+                    BuildBarChart("Product", "Quantity Sold", charts.ProductPerformance, false, true), "products"));
+                cards.Add(ChartItem("Sales by Product Category",
+                    BuildDonutChart(charts.SalesByCategory, true), "products"));
+                cards.Add(ChartItem("Customer Growth Trend",
                     BuildLineChart("Date", "Customer Count", false, false, ("Customers", charts.CustomerGrowth, AccentColor)),
-                    "customers"),
-                ChartItem("New vs. Returning Customers",
-                    BuildDonutChart(charts.NewVsReturningCustomers, false), "customers"),
-                ChartItem("Sales by Promotion",
-                    BuildDonutChart(charts.SalesByPromotion, true), "sales"),
-                ChartItem("Discount Amount by Promotion",
-                    BuildBarChart("Promotion", "Total Discount Amount", charts.DiscountByPromotion, true, true), "promotions"),
-                ChartItem("Top Customers by Loyalty Points",
-                    BuildBarChart("Customer", "Current Points", charts.TopLoyalCustomers, false, true), "loyalty"),
-                new CardItem(BuildLowStockCard(dashboard), 1),
-                ChartItem("Feedback & Inquiry Submissions Over Time",
+                    "customers"));
+            }
+
+            if (retention)
+            {
+                cards.Add(ChartItem("New vs. Returning Customers",
+                    BuildDonutChart(charts.NewVsReturningCustomers, false), "customers"));
+                cards.Add(ChartItem("Sales by Promotion",
+                    BuildDonutChart(charts.SalesByPromotion, true), "sales"));
+                cards.Add(ChartItem("Discount Amount by Promotion",
+                    BuildBarChart("Promotion", "Total Discount Amount", charts.DiscountByPromotion, true, true), "promotions"));
+                cards.Add(ChartItem("Top Customers by Loyalty Points",
+                    BuildBarChart("Customer", "Current Points", charts.TopLoyalCustomers, false, true), "loyalty"));
+            }
+
+            cards.Add(new CardItem(BuildLowStockCard(dashboard), 1));
+
+            if (feedbackVisible || inquiriesVisible)
+            {
+                cards.Add(ChartItem("Feedback & Inquiry Submissions Over Time",
                     BuildLineChart("Date", "Number of Submissions", false, true,
                         ("Feedback", charts.FeedbackTrend, AccentColor),
                         ("Inquiries", charts.InquiryTrend, Color.FromArgb(90, 65, 45))),
                     "feedback", 2));
+            }
+
+            AddSectionLabel(root, "ANALYTICS");
+            AddCardGrid(root, cards.ToArray());
         }
 
         private void BuildSalesTab(TableLayoutPanel root, ReportsOverviewModel overview, ReportChartsModel charts)
@@ -498,49 +695,90 @@ namespace freshcrumbs.CRM.winforms.UserControls
                 new Kpi("AVERAGE TRANSACTION", FormatPeso(overview.AverageTransaction), "sales"),
                 new Kpi("TOTAL PRODUCTS SOLD", FormatCount(overview.TotalProductsSold), "sales"));
 
-            AddCardGrid(root,
+            var cards = new List<CardItem>
+            {
                 ChartItem("Sales Trend",
                     BuildLineChart("Date", "Final Amount", true, true, ("Sales", charts.SalesTrend, AccentColor)),
-                    "sales", 2),
-                ChartItem("Sales by Promotion",
+                    "sales", 2)
+            };
+
+            if (TenantCapabilities.CanViewRetentionDashboard)
+            {
+                cards.Add(ChartItem("Sales by Promotion",
                     BuildDonutChart(charts.SalesByPromotion, true), "sales"));
+            }
+
+            AddCardGrid(root, cards.ToArray());
         }
 
         private void BuildCustomersTab(TableLayoutPanel root, DashboardModel dashboard, ReportsOverviewModel overview, ReportChartsModel charts)
         {
-            AddKpiRow(root,
+            bool retention = TenantCapabilities.CanViewRetentionDashboard;
+
+            var kpis = new List<Kpi>
+            {
                 new Kpi("TOTAL CUSTOMERS", FormatCount(overview.TotalCustomers), "customers"),
-                new Kpi("NEW CUSTOMERS (LAST 30 DAYS)", FormatCount(overview.NewCustomersLast30Days), "customers"),
-                new Kpi("REPEAT CUSTOMER RATE", FormatPercent(overview.RepeatCustomerRatePercent), "customers"));
+                new Kpi("NEW CUSTOMERS (LAST 30 DAYS)", FormatCount(overview.NewCustomersLast30Days), "customers")
+            };
+
+            if (retention)
+            {
+                kpis.Add(new Kpi("REPEAT CUSTOMER RATE", FormatPercent(overview.RepeatCustomerRatePercent), "customers"));
+            }
+
+            AddKpiRow(root, kpis.ToArray());
 
             AddSectionLabel(root, "CUSTOMER ACTIVITY THIS MONTH");
             AddKpiRow(root,
                 new Kpi("NEW CUSTOMERS", FormatCount(dashboard.NewCustomersThisMonth), "customers"),
                 new Kpi("ACTIVE CUSTOMERS", FormatCount(dashboard.ActiveCustomersThisMonth), "customers"));
 
-            AddCardGrid(root,
+            var cards = new List<CardItem>
+            {
                 ChartItem("Customer Growth Trend",
                     BuildLineChart("Date", "Customer Count", false, false, ("Customers", charts.CustomerGrowth, AccentColor)),
-                    "customers", 2),
-                ChartItem("New vs. Returning Customers",
+                    "customers", 2)
+            };
+
+            if (retention)
+            {
+                cards.Add(ChartItem("New vs. Returning Customers",
                     BuildDonutChart(charts.NewVsReturningCustomers, false), "customers"));
+            }
+
+            AddCardGrid(root, cards.ToArray());
         }
 
         private void BuildProductsTab(TableLayoutPanel root, DashboardModel dashboard, ReportsOverviewModel overview, ReportChartsModel charts)
         {
-            AddKpiRow(root,
-                new Kpi("TOTAL PRODUCTS SOLD", FormatCount(overview.TotalProductsSold), "products"),
-                new Kpi("ACTIVE PRODUCTS", FormatCount(dashboard.ActiveProducts), "products"),
-                new Kpi("LOW STOCK", FormatCount(dashboard.LowStockCount), "products", dashboard.LowStockCount > 0));
+            bool management = TenantCapabilities.CanViewManagementDashboard;
 
-            AddCardGrid(root,
-                ChartItem("Top-Selling Products",
-                    BuildBarChart("Product", "Quantity Sold", charts.ProductPerformance, false, true), "products"),
-                ChartItem("Sales by Product Category",
-                    BuildDonutChart(charts.SalesByCategory, true), "products"),
-                ChartItem("Product Stock",
-                    BuildBarChart("Product", "Current Stock", charts.ProductStock, false, true), "products"),
-                new CardItem(BuildLowStockCard(dashboard), 1));
+            var kpis = new List<Kpi>();
+
+            if (management)
+            {
+                kpis.Add(new Kpi("TOTAL PRODUCTS SOLD", FormatCount(overview.TotalProductsSold), "products"));
+            }
+
+            kpis.Add(new Kpi("ACTIVE PRODUCTS", FormatCount(dashboard.ActiveProducts), "products"));
+            kpis.Add(new Kpi("LOW STOCK", FormatCount(dashboard.LowStockCount), "products", dashboard.LowStockCount > 0));
+            AddKpiRow(root, kpis.ToArray());
+
+            var cards = new List<CardItem>();
+
+            if (management)
+            {
+                cards.Add(ChartItem("Top-Selling Products",
+                    BuildBarChart("Product", "Quantity Sold", charts.ProductPerformance, false, true), "products"));
+                cards.Add(ChartItem("Sales by Product Category",
+                    BuildDonutChart(charts.SalesByCategory, true), "products"));
+            }
+
+            cards.Add(ChartItem("Product Stock",
+                BuildBarChart("Product", "Current Stock", charts.ProductStock, false, true), "products"));
+            cards.Add(new CardItem(BuildLowStockCard(dashboard), 1));
+
+            AddCardGrid(root, cards.ToArray());
         }
 
         private void BuildPromotionsTab(TableLayoutPanel root, ReportsOverviewModel overview, ReportChartsModel charts)
@@ -590,6 +828,194 @@ namespace freshcrumbs.CRM.winforms.UserControls
                     "feedback", 2),
                 ChartItem("Inquiries by Type",
                     BuildBarChart("Inquiry Type", "Number of Inquiries", charts.InquiryTypes, false, false), "inquiries"));
+        }
+
+        private void BuildCompanyTab(TableLayoutPanel root, DashboardModel dashboard)
+        {
+            var company = dashboard.Company ?? new CompanySummaryModel();
+
+            var kpis = new List<Kpi>
+            {
+                new Kpi("DISCOUNTS GIVEN (THIS MONTH)", FormatPeso(company.DiscountsGivenThisMonth), "sales"),
+                new Kpi("CANCELLED TRANSACTIONS (THIS MONTH)", FormatCount(company.CancelledTransactionsThisMonth), "sales", company.CancelledTransactionsThisMonth > 0),
+                new Kpi("INVENTORY VALUE", FormatPeso(company.InventoryValue), "products")
+            };
+
+            if (TenantCapabilities.CanViewRetentionDashboard)
+            {
+                kpis.Add(new Kpi("OUTSTANDING LOYALTY POINTS", FormatCount(company.OutstandingLoyaltyPoints), "loyalty"));
+            }
+
+            AddSectionLabel(root, "COMPANY OVERVIEW");
+            AddKpiRow(root, kpis.ToArray());
+        }
+
+        // PREMIUM Branch BI. ADMIN: every active branch; MANAGER: the assigned branch only (the API applies the same scope).
+        private void BuildBranchesTab(TableLayoutPanel root, BranchDashboardModel branchData)
+        {
+            if (branchData.Scope == "NotAssigned")
+            {
+                AddSectionLabel(root, "MY BRANCH");
+                var card = CreateCardShell("Branch Performance", out var body);
+                body.Controls.Add(CreateEmptyState("You are not assigned to an active branch. Ask your administrator to assign you."));
+                AddRow(root, card, 160);
+                return;
+            }
+
+            bool company = branchData.Scope == "Company";
+            var branchRows = branchData.Branches.Where(b => !b.IsHistorical).ToList();
+
+            if (company)
+            {
+                string activeText = branchData.MaxBranches != null
+                    ? $"{branchData.ActiveBranches ?? 0} of {branchData.MaxBranches}"
+                    : FormatCount(branchData.ActiveBranches ?? 0);
+
+                AddSectionLabel(root, $"BRANCHES ({branchData.Period.ToUpperInvariant()})");
+                AddKpiRow(root,
+                    new Kpi("ACTIVE BRANCHES", activeText, "branches", false, "Plan limit shown when set"),
+                    new Kpi("BRANCH REVENUE", FormatPeso(branchRows.Sum(b => b.Revenue)), "sales", false, "Completed sales recorded at a branch"),
+                    new Kpi("BRANCH SALES", FormatCount(branchRows.Sum(b => b.SalesCount)), "sales"),
+                    new Kpi("TODAY (ALL BRANCHES)", FormatPeso(branchRows.Sum(b => b.TodayRevenue)), "sales", false,
+                        $"{FormatCount(branchRows.Sum(b => b.TodaySalesCount))} sale(s) today"));
+            }
+            else
+            {
+                var mine = branchRows.FirstOrDefault() ?? new BranchDashboardRowModel();
+
+                AddSectionLabel(root, $"{mine.BranchName.ToUpperInvariant()} ({branchData.Period.ToUpperInvariant()})");
+                AddKpiRow(root,
+                    new Kpi("BRANCH REVENUE", FormatPeso(mine.Revenue), "sales"),
+                    new Kpi("BRANCH SALES", FormatCount(mine.SalesCount), "sales"),
+                    new Kpi("CUSTOMER RETENTION", mine.RetentionRatePercent == null ? "-" : FormatPercent(mine.RetentionRatePercent.Value), "sales", false,
+                        $"{FormatCount(mine.ReturningCustomers ?? 0)} returning of {FormatCount(mine.PurchasingCustomers ?? 0)} customers"),
+                    new Kpi("TODAY", FormatPeso(mine.TodayRevenue), "sales", false, $"{FormatCount(mine.TodaySalesCount)} sale(s) today"));
+            }
+
+            AddSectionLabel(root, "LIVE BRANCH OPERATIONAL GRID");
+            AddRow(root, BuildBranchOperationsCard(branchRows), 300);
+
+            if (company)
+            {
+                AddSectionLabel(root, "BRANCH COMPARISON");
+                AddCardGrid(root,
+                    ChartItem("Multi-Branch Revenue Comparison",
+                        BuildBarChart("Branch", "Revenue", ToPoints(branchRows, b => (double)b.Revenue), true, true), "sales"),
+                    ChartItem("Total Sales per Branch",
+                        BuildBarChart("Branch", "Completed Sales", ToPoints(branchRows, b => b.SalesCount), false, true), "sales"),
+                    ChartItem("Customer Retention Comparison (% returning customers)",
+                        BuildBarChart("Branch", "Returning Customers (%)",
+                            ToPoints(branchRows.Where(b => b.RetentionRatePercent != null), b => b.RetentionRatePercent ?? 0), false, true), "sales", 2));
+            }
+
+            AddSectionLabel(root, "BRANCH PERFORMANCE (SELECTED PERIOD)");
+            AddRow(root, BuildBranchPerformanceCard(branchData.Branches), 300);
+        }
+
+        private static List<ChartPointModel> ToPoints(IEnumerable<BranchDashboardRowModel> rows, Func<BranchDashboardRowModel, double> value)
+        {
+            return rows.Select(r => new ChartPointModel { Label = r.BranchName, Value = value(r) }).ToList();
+        }
+
+        private Panel BuildBranchOperationsCard(List<BranchDashboardRowModel> rows)
+        {
+            var card = CreateCardShell("Today by Branch", out var body, "View Branches", "branches");
+
+            if (rows.Count == 0)
+            {
+                body.Controls.Add(CreateEmptyState("No active branches yet."));
+                return card;
+            }
+
+            var list = CreateBranchList(
+                ("Branch", 0.2f), ("Sales Today", 0.1f), ("Revenue Today", 0.13f), ("Last Sale", 0.16f),
+                ("Units on Hand", 0.11f), ("Low-Stock Items", 0.11f), ("Assigned Accounts", 0.11f), ("Status", 0.08f));
+
+            foreach (var row in rows)
+            {
+                var item = new ListViewItem(row.BranchName);
+                item.SubItems.Add(FormatCount(row.TodaySalesCount));
+                item.SubItems.Add(FormatPeso(row.TodayRevenue));
+                item.SubItems.Add(row.LastSaleAt?.ToString("MMM dd, yyyy h:mm tt", CultureInfo.InvariantCulture) ?? "No sales yet");
+                item.SubItems.Add(FormatCount(row.UnitsOnHand ?? 0));
+                item.SubItems.Add(FormatCount(row.LowStockItems ?? 0));
+                item.SubItems.Add(FormatCount(row.AssignedAccounts ?? 0));
+                item.SubItems.Add(row.Status);
+
+                if ((row.LowStockItems ?? 0) > 0)
+                {
+                    item.UseItemStyleForSubItems = false;
+                    item.SubItems[5].ForeColor = LowStockRed;
+                }
+
+                list.Items.Add(item);
+            }
+
+            body.Controls.Add(list);
+            return card;
+        }
+
+        private Panel BuildBranchPerformanceCard(List<BranchDashboardRowModel> rows)
+        {
+            var card = CreateCardShell("Revenue, Sales and Retention", out var body);
+
+            if (rows.Count == 0)
+            {
+                body.Controls.Add(CreateEmptyState("No branch data for the selected period."));
+                return card;
+            }
+
+            var list = CreateBranchList(
+                ("Branch", 0.22f), ("Revenue", 0.13f), ("Sales", 0.08f), ("Average Sale", 0.12f),
+                ("Customers", 0.1f), ("Returning", 0.1f), ("New", 0.1f), ("Retention", 0.1f));
+
+            foreach (var row in rows)
+            {
+                var item = new ListViewItem(row.BranchName);
+                item.SubItems.Add(FormatPeso(row.Revenue));
+                item.SubItems.Add(FormatCount(row.SalesCount));
+                item.SubItems.Add(FormatPeso(row.AverageSale));
+                item.SubItems.Add(row.PurchasingCustomers == null ? "-" : FormatCount(row.PurchasingCustomers.Value));
+                item.SubItems.Add(row.ReturningCustomers == null ? "-" : FormatCount(row.ReturningCustomers.Value));
+                item.SubItems.Add(row.NewCustomers == null ? "-" : FormatCount(row.NewCustomers.Value));
+                item.SubItems.Add(row.RetentionRatePercent == null ? "-" : FormatPercent(row.RetentionRatePercent.Value));
+
+                if (row.IsHistorical)
+                {
+                    item.ForeColor = LabelGray;
+                    item.ToolTipText = "Sales recorded before branching. They are not attributed to any branch.";
+                }
+
+                list.Items.Add(item);
+            }
+
+            body.Controls.Add(list);
+            return card;
+        }
+
+        private static ListView CreateBranchList(params (string Header, float Weight)[] columns)
+        {
+            var list = new ListView
+            {
+                Dock = DockStyle.Fill,
+                View = View.Details,
+                FullRowSelect = true,
+                GridLines = false,
+                HeaderStyle = ColumnHeaderStyle.Nonclickable,
+                MultiSelect = false,
+                Font = new Font("Segoe UI", 9.5f),
+                BorderStyle = BorderStyle.None,
+                ShowItemToolTips = true
+            };
+
+            foreach (var (header, _) in columns)
+            {
+                list.Columns.Add(header, 100);
+            }
+
+            var weights = columns.Select(c => c.Weight).ToArray();
+            list.Resize += (s, e) => FitListColumns(list, weights);
+            return list;
         }
 
         private static Kpi BuildTotalSalesKpi(ReportsOverviewModel overview)
@@ -747,9 +1173,25 @@ namespace freshcrumbs.CRM.winforms.UserControls
             return new CardItem(card, span);
         }
 
+        private static bool IsModuleReachable(string moduleKey)
+        {
+            return moduleKey switch
+            {
+                "promotions" => TenantCapabilities.CanManagePromotions,
+                "loyalty" => TenantCapabilities.CanManageLoyalty,
+                "products" => TenantCapabilities.CanViewProducts,
+                _ => true
+            };
+        }
+
         private void MakeClickable(Control control, string moduleKey)
         {
             if (_navigateToModule == null)
+            {
+                return;
+            }
+
+            if (!IsModuleReachable(moduleKey))
             {
                 return;
             }
@@ -1063,6 +1505,270 @@ namespace freshcrumbs.CRM.winforms.UserControls
             }
 
             return card;
+        }
+
+        // ---------------------------------------------------- operational reports (STAFF Reports module)
+
+        // Only the modules this role and plan include; the API returns the same sections (and refuses the rest).
+        private static List<string> GetOperationalTabs()
+        {
+            var tabs = new List<string> { "Sales", "Customers" };
+
+            if (TenantCapabilities.CanViewProducts)
+            {
+                tabs.Add("Products and Stock");
+            }
+
+            if (TenantCapabilities.IsFeatureAvailable("DataCollection"))
+            {
+                tabs.Add("Feedback");
+                tabs.Add("Inquiries");
+            }
+
+            if (TenantCapabilities.CanUsePromotions)
+            {
+                tabs.Add("Promotions");
+            }
+
+            if (TenantCapabilities.CanUseLoyalty)
+            {
+                tabs.Add("Loyalty");
+            }
+
+            return tabs;
+        }
+
+        private void BuildOperationalReports(OperationalReportModel report)
+        {
+            SuspendLayout();
+
+            for (int i = 0; i < _tabRoots.Count; i++)
+            {
+                ClearRoot(_tabRoots[i]);
+            }
+
+            string scope = !report.BranchScoped
+                ? "PERIOD: " + report.Period.ToUpperInvariant()
+                : report.BranchName != null
+                    ? $"BRANCH: {report.BranchName.ToUpperInvariant()}  ·  {report.Period.ToUpperInvariant()}"
+                    : "NOT ASSIGNED TO A BRANCH - ASK YOUR ADMINISTRATOR";
+
+            for (int i = 0; i < _tabNames.Count; i++)
+            {
+                var root = _tabRoots[i];
+                AddSectionLabel(root, scope);
+
+                switch (_tabNames[i])
+                {
+                    case "Sales":
+                        BuildOperationalSalesTab(root, report.Sales);
+                        break;
+                    case "Customers":
+                        BuildOperationalCustomersTab(root, report.Customers);
+                        break;
+                    case "Products and Stock":
+                        BuildOperationalProductsTab(root, report.Products);
+                        break;
+                    case "Feedback":
+                        BuildOperationalFeedbackTab(root, report.Feedback);
+                        break;
+                    case "Inquiries":
+                        BuildOperationalInquiriesTab(root, report.Inquiries);
+                        break;
+                    case "Promotions":
+                        BuildOperationalPromotionsTab(root, report.Promotions);
+                        break;
+                    case "Loyalty":
+                        BuildOperationalLoyaltyTab(root, report.Loyalty);
+                        break;
+                }
+            }
+
+            for (int i = 0; i < _tabRoots.Count; i++)
+            {
+                _tabRoots[i].ResumeLayout(true);
+                HookWheelFocus(_tabRoots[i], _tabScrolls[i]);
+            }
+
+            ResumeLayout(true);
+        }
+
+        private void BuildOperationalSalesTab(TableLayoutPanel root, OperationalSalesModel sales)
+        {
+            AddKpiRow(root,
+                new Kpi("TOTAL SALES", FormatPeso(sales.TotalSales), "sales"),
+                new Kpi("TRANSACTIONS", FormatCount(sales.Transactions), "sales"),
+                new Kpi("AVERAGE SALE", FormatPeso(sales.AverageSale), "sales"));
+
+            AddCardGrid(root,
+                ChartItem("Sales Trend", BuildLineChart("Date", "Final Amount", true, true, ("Sales", sales.Trend, AccentColor)), "sales", 2),
+                new CardItem(BuildListCard("Recent Sales", "No completed sales in this period.", "View Sales", "sales",
+                    new[] { "Date", "Customer", "Amount", "Payment" },
+                    new[] { 0.24f, 0.36f, 0.2f, 0.2f },
+                    sales.Recent.Select(s => new[] { FormatDateTime(s.Date), s.Customer, FormatPeso(s.FinalAmount), s.PaymentMethod })), 2));
+        }
+
+        private void BuildOperationalCustomersTab(TableLayoutPanel root, OperationalCustomersModel customers)
+        {
+            AddKpiRow(root,
+                new Kpi("CUSTOMERS WHO BOUGHT", FormatCount(customers.ActiveCustomers), "customers"),
+                new Kpi("NEW CUSTOMERS", FormatCount(customers.NewCustomers), "customers"));
+
+            AddCardGrid(root,
+                new CardItem(BuildRecentCustomersCard(customers), 2));
+        }
+
+        private void BuildOperationalProductsTab(TableLayoutPanel root, OperationalProductsModel? products)
+        {
+            if (products == null)
+            {
+                return;
+            }
+
+            AddKpiRow(root,
+                new Kpi("ACTIVE PRODUCTS", FormatCount(products.ActiveProducts), "products"),
+                new Kpi("LOW STOCK", FormatCount(products.LowStockCount), "products", products.LowStockCount > 0));
+
+            AddCardGrid(root,
+                ChartItem("Top-Selling Products", BuildBarChart("Product", "Quantity Sold", products.TopProducts, false, true), "products"),
+                new CardItem(BuildListCard("Low-Stock Products", "All products are sufficiently stocked.", "View Products", "products",
+                    new[] { "Product", "Stock", "Reorder Level" },
+                    new[] { 0.5f, 0.25f, 0.25f },
+                    products.LowStock.Select(p => new[] { p.Name, FormatCount(p.Quantity), FormatCount(p.ReorderLevel) })), 1));
+        }
+
+        private void BuildOperationalFeedbackTab(TableLayoutPanel root, OperationalFeedbackModel? feedback)
+        {
+            if (feedback == null)
+            {
+                return;
+            }
+
+            AddKpiRow(root,
+                new Kpi("TOTAL FEEDBACK", FormatCount(feedback.Total), "feedback"),
+                new Kpi("COMPLAINTS", FormatCount(feedback.Complaints), "feedback"),
+                new Kpi("NOT YET RESOLVED", FormatCount(feedback.Open), "feedback", feedback.Open > 0));
+
+            AddCardGrid(root,
+                ChartItem("Feedback by Category", BuildBarChart("Category", "Submissions", feedback.ByCategory, false, true), "feedback", 2),
+                new CardItem(BuildListCard("Recent Feedback", "No feedback in this period.", "View Feedback", "feedback",
+                    new[] { "Date", "Customer", "Type", "Category", "Status" },
+                    new[] { 0.2f, 0.26f, 0.16f, 0.22f, 0.16f },
+                    feedback.Recent.Select(f => new[] { FormatDateTime(f.Date), f.Customer, f.Type, f.Category, f.Status })), 2));
+        }
+
+        private void BuildOperationalInquiriesTab(TableLayoutPanel root, OperationalInquiriesModel? inquiries)
+        {
+            if (inquiries == null)
+            {
+                return;
+            }
+
+            AddKpiRow(root,
+                new Kpi("TOTAL INQUIRIES", FormatCount(inquiries.Total), "inquiries"),
+                new Kpi("RESPONDED", FormatCount(inquiries.Responded), "inquiries"),
+                new Kpi("AWAITING RESPONSE", FormatCount(inquiries.Pending), "inquiries", inquiries.Pending > 0));
+
+            AddCardGrid(root,
+                ChartItem("Inquiries by Status", BuildDonutChart(inquiries.ByStatus, false), "inquiries", 2),
+                new CardItem(BuildListCard("Recent Inquiries", "No inquiries in this period.", "View Inquiries", "inquiries",
+                    new[] { "Date", "Customer", "Type", "Subject", "Status" },
+                    new[] { 0.2f, 0.24f, 0.16f, 0.24f, 0.16f },
+                    inquiries.Recent.Select(i => new[] { FormatDateTime(i.Date), i.Customer, i.Type, i.Subject, i.Status })), 2));
+        }
+
+        private void BuildOperationalPromotionsTab(TableLayoutPanel root, OperationalPromotionsModel? promotions)
+        {
+            if (promotions == null)
+            {
+                return;
+            }
+
+            AddKpiRow(root,
+                new Kpi("ACTIVE PROMOTIONS", FormatCount(promotions.ActivePromotions), "promotions"),
+                new Kpi("SALES WITH A PROMOTION", FormatCount(promotions.SalesWithPromotion), "sales"));
+
+            AddCardGrid(root,
+                ChartItem("Promotion Use (Number of Sales)", BuildBarChart("Promotion", "Sales", promotions.Usage, false, true), "promotions", 2));
+        }
+
+        private void BuildOperationalLoyaltyTab(TableLayoutPanel root, OperationalLoyaltyModel? loyalty)
+        {
+            if (loyalty == null)
+            {
+                return;
+            }
+
+            AddKpiRow(root,
+                new Kpi("POINTS EARNED", FormatCount(loyalty.PointsEarned), "loyalty"),
+                new Kpi("POINTS USED", FormatCount(loyalty.PointsUsed), "loyalty"));
+        }
+
+        private Panel BuildRecentCustomersCard(OperationalCustomersModel customers)
+        {
+            return BuildListCard("Recent Customers", "No customer purchases in this period.", "View Customers", "customers",
+                new[] { "Code", "Customer", "Last Purchase", "Purchases" },
+                new[] { 0.18f, 0.36f, 0.28f, 0.18f },
+                customers.Recent.Select(c => new[] { c.Code, c.Name, FormatDateTime(c.LastPurchase), FormatCount(c.Purchases) }));
+        }
+
+        private Panel BuildListCard(
+            string title,
+            string emptyText,
+            string? buttonLabel,
+            string? buttonTarget,
+            string[] headers,
+            float[] weights,
+            IEnumerable<string[]> rows)
+        {
+            var card = CreateCardShell(title, out var body, buttonLabel, buttonTarget);
+            var data = rows.ToList();
+
+            if (data.Count == 0)
+            {
+                body.Controls.Add(CreateEmptyState(emptyText));
+                return card;
+            }
+
+            var list = new ListView
+            {
+                Dock = DockStyle.Fill,
+                View = View.Details,
+                FullRowSelect = false,
+                GridLines = false,
+                HeaderStyle = ColumnHeaderStyle.Nonclickable,
+                MultiSelect = false,
+                Font = new Font("Segoe UI", 9.5f),
+                BorderStyle = BorderStyle.None,
+                ShowItemToolTips = true
+            };
+
+            foreach (string header in headers)
+            {
+                list.Columns.Add(header, 120);
+            }
+
+            list.Resize += (s, e) => FitListColumns(list, weights);
+
+            foreach (var row in data)
+            {
+                var item = new ListViewItem(row[0]);
+
+                for (int c = 1; c < row.Length; c++)
+                {
+                    item.SubItems.Add(row[c]);
+                }
+
+                list.Items.Add(item);
+            }
+
+            body.Controls.Add(list);
+            return card;
+        }
+
+        private static string FormatDateTime(DateTime value)
+        {
+            return value.ToString("MMM d, h:mm tt", CultureInfo.InvariantCulture);
         }
 
         private static Label CreateEmptyState(string message)

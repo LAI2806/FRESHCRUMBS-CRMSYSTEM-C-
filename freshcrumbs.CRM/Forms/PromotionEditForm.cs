@@ -26,9 +26,18 @@ namespace freshcrumbs.CRM.winforms.Forms
         private ComboBox _statusBox = null!;
         private Label _errorLabel = null!;
 
-        public PromotionEditForm(PromotionModel? existingPromotion)
+        // PREMIUM ADMIN: branches to choose from (null = no choice). PREMIUM MANAGER: their branch, shown read-only.
+        private readonly List<BranchModel>? _branches;
+        private readonly string? _fixedBranchName;
+        private readonly int? _existingBranchId;
+        private ComboBox? _branchBox;
+
+        public PromotionEditForm(PromotionModel? existingPromotion, List<BranchModel>? branches = null, string? fixedBranchName = null)
         {
             _isEditMode = existingPromotion != null;
+            _branches = branches;
+            _fixedBranchName = fixedBranchName;
+            _existingBranchId = existingPromotion?.BranchId;
 
             InitializeForm();
             InitializeControls();
@@ -46,7 +55,9 @@ namespace freshcrumbs.CRM.winforms.Forms
                     RequiredLoyaltyPoints = existingPromotion.RequiredLoyaltyPoints,
                     StartDate = existingPromotion.StartDate,
                     EndDate = existingPromotion.EndDate,
-                    Status = existingPromotion.Status
+                    Status = existingPromotion.Status,
+                    EligibilityCategory = existingPromotion.EligibilityCategory,
+                    BranchId = existingPromotion.BranchId
                 };
 
                 _nameBox.Text = Result.PromotionName;
@@ -98,7 +109,9 @@ namespace freshcrumbs.CRM.winforms.Forms
             root.Controls.Add(titleLabel);
 
             _nameBox = AddField(root, "Promotion Name");
+            _nameBox.MaxLength = 200;
             _descriptionBox = AddField(root, "Description");
+            _descriptionBox.MaxLength = 500;
 
             var discountTypeLabel = new Label
             {
@@ -257,6 +270,8 @@ namespace freshcrumbs.CRM.winforms.Forms
                 root.Controls.Add(_statusBox);
             }
 
+            AddBranchField(root);
+
             _errorLabel = new Label
             {
                 Text = "",
@@ -323,6 +338,61 @@ namespace freshcrumbs.CRM.winforms.Forms
             Controls.Add(root);
         }
 
+        private void AddBranchField(TableLayoutPanel root)
+        {
+            if (_branches == null && _fixedBranchName == null)
+            {
+                return;
+            }
+
+            root.Controls.Add(new Label
+            {
+                Text = "BRANCH",
+                Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
+                ForeColor = LabelGray,
+                AutoSize = true,
+                Margin = new Padding(0, 0, 0, 4)
+            });
+
+            if (_branches == null)
+            {
+                root.Controls.Add(new Label
+                {
+                    Text = _fixedBranchName,
+                    Font = new Font("Segoe UI", 10.5f, FontStyle.Bold),
+                    ForeColor = TextDark,
+                    AutoSize = true,
+                    Margin = new Padding(0, 0, 0, 14)
+                });
+                return;
+            }
+
+            _branchBox = new ComboBox
+            {
+                Width = 380,
+                Height = 34,
+                Font = new Font("Segoe UI", 10.5f),
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                FlatStyle = FlatStyle.Flat,
+                Margin = new Padding(0, 0, 0, 14)
+            };
+
+            var allBranches = new BranchModel { BranchId = 0, BranchName = "All Branches" };
+            _branchBox.Items.Add(allBranches);
+
+            // An inactive branch stays listed only for the promotion that already uses it, so editing never loses it.
+            foreach (var branch in _branches.Where(b =>
+                         string.Equals(b.Status, "Active", StringComparison.OrdinalIgnoreCase) || b.BranchId == _existingBranchId))
+            {
+                _branchBox.Items.Add(branch);
+            }
+
+            _branchBox.SelectedItem = _branchBox.Items.OfType<BranchModel>().FirstOrDefault(b => b.BranchId == _existingBranchId)
+                ?? allBranches;
+
+            root.Controls.Add(_branchBox);
+        }
+
         private TextBox AddField(TableLayoutPanel root, string labelText)
         {
             var label = new Label
@@ -372,6 +442,11 @@ namespace freshcrumbs.CRM.winforms.Forms
             // New promotions are always Active. Status is only user-editable
             // in edit mode, where it drives soft-delete / reactivation.
             Result.Status = _isEditMode ? _statusBox.Text : "Active";
+
+            if (_branchBox?.SelectedItem is BranchModel branch)
+            {
+                Result.BranchId = branch.BranchId == 0 ? null : branch.BranchId;
+            }
 
             DialogResult = DialogResult.OK;
             Close();

@@ -44,6 +44,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
             public string Comment { get; set; } = string.Empty;
             public DateTime DateSubmitted { get; set; }
             public string Status { get; set; } = string.Empty;
+            public string BranchName { get; set; } = string.Empty;
         }
 
         public FeedbackControl(int companyId)
@@ -95,6 +96,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
             };
             _searchBox.TextChanged += SearchBox_TextChanged;
             toolbarPanel.Controls.Add(_searchBox);
+            AddBranchFilter(toolbarPanel);
 
             _addButton = CreateActionButton("+  Add Feedback", AccentColor, Color.White, 160);
             _addButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
@@ -116,6 +118,13 @@ namespace freshcrumbs.CRM.winforms.UserControls
             _deleteButton.Enabled = false;
             _deleteButton.Click += DeleteButton_Click;
             toolbarPanel.Controls.Add(_deleteButton);
+
+            // STAFF may record feedback and complaints; managing existing records is a management action.
+            if (!TenantCapabilities.CanManageFeedback)
+            {
+                _editButton.Visible = false;
+                _deleteButton.Visible = false;
+            }
 
             toolbarPanel.Resize += (s, e) => PositionToolbarButtons(toolbarPanel);
 
@@ -300,6 +309,12 @@ namespace freshcrumbs.CRM.winforms.UserControls
             _feedbackGrid.DataSource = null;
             _feedbackGrid.DataSource = pageItems;
 
+            if (_feedbackGrid.Columns["BranchName"] != null)
+            {
+                _feedbackGrid.Columns["BranchName"].Visible = TenantCapabilities.HasBranching;
+                _feedbackGrid.Columns["BranchName"].HeaderText = "Branch";
+            }
+
             if (_feedbackGrid.Columns["FeedbackId"] != null)
             {
                 _feedbackGrid.Columns["FeedbackId"].Visible = false;
@@ -339,12 +354,66 @@ namespace freshcrumbs.CRM.winforms.UserControls
                 // Include inactive customers so older records still show their Customer Code and name.
                 _customers = await _apiService.GetCustomersAsync(_companyId, includeInactive: true);
                 _feedbackList = await _apiService.GetFeedbackAsync(_companyId);
+                await PopulateBranchFilterAsync();
                 BindGrid();
             }
             catch (Exception ex)
             {
-                _statusLabel.Text = $"Failed to load feedback: {ex.Message}";
+                _statusLabel.Text = $"Failed to load feedback: {ErrorMessageHelper.GetFriendlyMessage(ex)}";
             }
+        }
+
+        private const int AllBranches = -1;
+        private const int NoBranch = 0;
+        private ComboBox? _branchFilter;
+
+        // PREMIUM ADMIN only: filter by branch. MANAGER / STAFF already receive only their branch from the API.
+        private void AddBranchFilter(Panel toolbarPanel)
+        {
+            if (!TenantCapabilities.CanFilterByBranch)
+            {
+                return;
+            }
+
+            _branchFilter = new ComboBox
+            {
+                Location = new Point(330, 10),
+                Width = 200,
+                Height = 34,
+                Font = new Font("Segoe UI", 10),
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                FlatStyle = FlatStyle.Flat
+            };
+            _branchFilter.SelectedIndexChanged += (s, e) => BindGrid();
+            toolbarPanel.Controls.Add(_branchFilter);
+        }
+
+        private async Task PopulateBranchFilterAsync()
+        {
+            if (_branchFilter == null || _branchFilter.Items.Count > 0)
+            {
+                return;
+            }
+
+            var branches = await _apiService.GetBranchesAsync(_companyId);
+
+            _branchFilter.Items.Add(new BranchModel { BranchId = AllBranches, BranchName = "All Branches" });
+
+            foreach (var branch in branches.Where(b => string.Equals(b.Status, "Active", StringComparison.OrdinalIgnoreCase)))
+            {
+                _branchFilter.Items.Add(branch);
+            }
+
+            _branchFilter.Items.Add(new BranchModel { BranchId = NoBranch, BranchName = "No branch (earlier records)" });
+            _branchFilter.SelectedIndex = 0;
+        }
+
+        private bool MatchesBranchFilter(int? branchId)
+        {
+            int selected = (_branchFilter?.SelectedItem as BranchModel)?.BranchId ?? AllBranches;
+
+            return selected == AllBranches
+                || (selected == NoBranch ? branchId == null : branchId == selected);
         }
 
         private void BindGrid(bool resetPage = true)
@@ -352,6 +421,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
             string term = _searchBox?.Text.Trim().ToLowerInvariant() ?? "";
 
             _filteredRows = _feedbackList
+                .Where(x => MatchesBranchFilter(x.BranchId))
                 .Select(f => new FeedbackDisplayRow
                 {
                     FeedbackId = f.FeedbackId,
@@ -361,7 +431,8 @@ namespace freshcrumbs.CRM.winforms.UserControls
                     Category = f.Category,
                     Comment = f.Comment,
                     DateSubmitted = f.DateSubmitted,
-                    Status = f.Status
+                    Status = f.Status,
+                    BranchName = f.BranchName ?? string.Empty
                 })
                 .Where(row =>
                     string.IsNullOrEmpty(term) ||
@@ -440,7 +511,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
             }
             catch (Exception ex)
             {
-                _statusLabel.Text = $"Failed to create feedback: {ex.Message}";
+                _statusLabel.Text = $"Failed to create feedback: {ErrorMessageHelper.GetFriendlyMessage(ex)}";
             }
         }
 
@@ -466,7 +537,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
             }
             catch (Exception ex)
             {
-                _statusLabel.Text = $"Failed to update feedback: {ex.Message}";
+                _statusLabel.Text = $"Failed to update feedback: {ErrorMessageHelper.GetFriendlyMessage(ex)}";
             }
         }
 
@@ -497,7 +568,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
             }
             catch (Exception ex)
             {
-                _statusLabel.Text = $"Failed to delete feedback: {ex.Message}";
+                _statusLabel.Text = $"Failed to delete feedback: {ErrorMessageHelper.GetFriendlyMessage(ex)}";
             }
         }
     }

@@ -1,5 +1,6 @@
 ﻿using FontAwesome.Sharp;
 using freshcrumbs.CRM.winforms.Models;
+using freshcrumbs.CRM.winforms.Services;
 using freshcrumbs.CRM.winforms.UserControls;
 using System.Windows.Input;
 
@@ -21,6 +22,12 @@ namespace freshcrumbs.CRM.winforms.Forms
         private readonly Dictionary<string, IconChar> _navIcons = new();
 
         private readonly Dictionary<string, Button> _navButtons = new();
+        private Label _profileCompanyLabel = null!;
+        private Label _profileNameLabel = null!;
+        private Label _profileRoleLabel = null!;
+
+        // Set when the user chose Log Out (the login screen opens again instead of the application closing).
+        public bool LogoutRequested { get; private set; }
         private string _activeKey = "dashboard";
 
         private static readonly Color SidebarBg = Color.White;
@@ -44,24 +51,54 @@ namespace freshcrumbs.CRM.winforms.Forms
             SetActiveModule(GetStartModule());
         }
 
+        // Subscription side: which plan feature a module needs. The dashboard exists on every plan
+        // (Basic Dashboard), and so do Reports (Basic Reports), so neither has an entry.
         private static readonly Dictionary<string, string> ModuleFeatures = new()
         {
-            ["dashboard"] = "BusinessIntelligence",
-            ["reports"] = "BusinessIntelligence",
             ["products"] = "MainTransactions",
             ["sales"] = "MainTransactions",
             ["customers"] = "MainTransactions",
             ["feedback"] = "DataCollection",
             ["inquiries"] = "DataCollection",
             ["promotions"] = "ActionsRetention",
-            ["loyalty"] = "ActionsRetention"
+            ["loyalty"] = "ActionsRetention",
+            ["branches"] = "Branching"
         };
 
+        // A module is shown only when the SUBSCRIPTION provides it AND the user's ROLE allows it.
         private bool IsModuleAllowed(string key)
+        {
+            return IsFeatureAllowed(key) && IsRoleAllowedForModule(key);
+        }
+
+        private bool IsFeatureAllowed(string key)
         {
             return _currentCompany.EnabledFeatures == null
                 || !ModuleFeatures.TryGetValue(key, out var feature)
                 || _currentCompany.EnabledFeatures.Contains(feature);
+        }
+
+        // Role side. Staff get the Product List (view/search/filter) but not Promotions or Loyalty management.
+        private static bool IsRoleAllowedForModule(string key)
+        {
+            return key switch
+            {
+                "dashboard" => TenantCapabilities.CanViewDashboardData,
+                "products" => TenantCapabilities.CanViewProducts,
+                "promotions" => TenantCapabilities.CanManagePromotions,
+                "loyalty" => TenantCapabilities.CanManageLoyalty,
+                "reports" => TenantCapabilities.CanGenerateReports || TenantCapabilities.CanViewOperationalReports,
+                "branches" => TenantCapabilities.CanManageBranchStock,
+                "users" => TenantCapabilities.CanManageUsers,
+                _ => true
+            };
+        }
+
+        private string GetNotAvailableMessage(string key)
+        {
+            return IsFeatureAllowed(key)
+                ? "Your role does not have access to this module."
+                : "Your current subscription plan does not include this module.";
         }
 
         private void ApplyFeatureVisibility()
@@ -70,11 +107,17 @@ namespace freshcrumbs.CRM.winforms.Forms
             {
                 kvp.Value.Visible = IsModuleAllowed(kvp.Key);
             }
+
+            // Same Products screen for everyone; only the label (and the actions inside it) follow the role.
+            if (_navButtons.TryGetValue("products", out var productsButton))
+            {
+                productsButton.Text = "   " + (TenantCapabilities.CanManageProducts ? "Product Management" : "Product List");
+            }
         }
 
         private string GetStartModule()
         {
-            return _navButtons.Keys.FirstOrDefault(IsModuleAllowed) ?? "settings";
+            return _navButtons.Keys.FirstOrDefault(IsModuleAllowed) ?? "dashboard";
         }
         private void ShowProductManagement()
         {
@@ -82,6 +125,22 @@ namespace freshcrumbs.CRM.winforms.Forms
 
             var productControl = new ProductControl(_currentCompany.CompanyId);
             _contentPanel.Controls.Add(productControl);
+        }
+
+        private void ShowBranchManagement()
+        {
+            _contentPanel.Controls.Clear();
+
+            var branchControl = new BranchControl(_currentCompany.CompanyId);
+            _contentPanel.Controls.Add(branchControl);
+        }
+
+        private void ShowUserManagement()
+        {
+            _contentPanel.Controls.Clear();
+
+            var userControl = new TenantUserControl(_currentCompany.CompanyId);
+            _contentPanel.Controls.Add(userControl);
         }
 
         private void ShowSalesManagement()
@@ -110,7 +169,10 @@ namespace freshcrumbs.CRM.winforms.Forms
         {
             _contentPanel.Controls.Clear();
 
-            var reportsControl = new ReportsControl(_currentCompany.CompanyId, SetActiveModule);
+            // ADMIN / MANAGER: the report generator. STAFF: read-only operational reports on the dashboard layout.
+            Control reportsControl = TenantCapabilities.CanGenerateReports
+                ? new ReportsControl(_currentCompany.CompanyId, SetActiveModule)
+                : new DashboardControl(_currentCompany.CompanyId, SetActiveModule, operationalReports: true);
             _contentPanel.Controls.Add(reportsControl);
         }
         private void InitializeForm()
@@ -178,7 +240,7 @@ namespace freshcrumbs.CRM.winforms.Forms
                 new RowStyle(SizeType.Percent, 100f));
 
             _sidebarLayout.RowStyles.Add(
-                new RowStyle(SizeType.Absolute, 70f));
+                new RowStyle(SizeType.Absolute, 108f));
 
             _sidebarPanel.Controls.Add(_sidebarLayout);
 
@@ -219,8 +281,9 @@ namespace freshcrumbs.CRM.winforms.Forms
                 Dock = DockStyle.Fill,
                 FlowDirection = FlowDirection.TopDown,
                 WrapContents = false,
-                AutoScroll = false,
-                Padding = new Padding(18, 15, 18, 0),
+                // Scrolls when the window is too short for every module (no right padding, so no horizontal bar).
+                AutoScroll = true,
+                Padding = new Padding(18, 8, 0, 0),
                 Margin = new Padding(0),
                 BackColor = SidebarBg
             };
@@ -235,7 +298,9 @@ namespace freshcrumbs.CRM.winforms.Forms
                 (IconChar.Comment, "Feedback", "feedback"),
                 (IconChar.QuestionCircle, "Inquiries", "inquiries"),
                 (IconChar.CashRegister, "Sales", "sales"),
-                (IconChar.ChartLine, "Reports", "reports")
+                (IconChar.CodeBranch, "Branches", "branches"),
+                (IconChar.ChartLine, "Reports", "reports"),
+                (IconChar.UsersGear, "Users", "users")
                         };
 
             foreach (var item in navItems)
@@ -250,26 +315,7 @@ namespace freshcrumbs.CRM.winforms.Forms
                 _navFlowPanel.Controls.Add(navButton);
             }
 
-            var settingsPanel = new Panel
-            {
-                Dock = DockStyle.Fill,
-                BackColor = SidebarBg,
-                Padding = new Padding(15, 15, 15, 15),
-                Margin = new Padding(0)
-            };
-
-            var settingsButton = CreateNavButton(
-                IconChar.Gear,
-                "Settings",
-                "settings");
-
-            settingsButton.Dock = DockStyle.Fill;
-            settingsButton.Margin = new Padding(0);
-
-            _navButtons["settings"] = settingsButton;
-            _navIcons["settings"] = IconChar.Gear;
-
-            settingsPanel.Controls.Add(settingsButton);
+            var profilePanel = CreateProfilePanel();
 
             _sidebarLayout.Controls.Add(
                 logoPanel,
@@ -282,7 +328,7 @@ namespace freshcrumbs.CRM.winforms.Forms
                 1);
 
             _sidebarLayout.Controls.Add(
-                settingsPanel,
+                profilePanel,
                 0,
                 2);
 
@@ -301,6 +347,147 @@ namespace freshcrumbs.CRM.winforms.Forms
                 0);
         }
 
+        // Signed-in user: company, name and role, with My Account and Log Out (every role).
+        private Panel CreateProfilePanel()
+        {
+            var panel = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = SidebarBg,
+                Padding = new Padding(18, 8, 14, 6),
+                Margin = new Padding(0)
+            };
+
+            var layout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 4,
+                BackColor = SidebarBg,
+                Margin = new Padding(0),
+                Padding = new Padding(0)
+            };
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 20f));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 22f));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 18f));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+
+            _profileCompanyLabel = CreateProfileLabel(new Font("Segoe UI", 9, FontStyle.Bold), AccentColor);
+            _profileNameLabel = CreateProfileLabel(new Font("Segoe UI", 10.5f, FontStyle.Bold), Color.FromArgb(50, 35, 25));
+            _profileRoleLabel = CreateProfileLabel(new Font("Segoe UI", 8.5f), SidebarText);
+
+            layout.Controls.Add(_profileCompanyLabel, 0, 0);
+            layout.Controls.Add(_profileNameLabel, 0, 1);
+            layout.Controls.Add(_profileRoleLabel, 0, 2);
+
+            var actions = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
+                BackColor = SidebarBg,
+                Margin = new Padding(0),
+                Padding = new Padding(0, 4, 0, 0)
+            };
+
+            var accountButton = CreateProfileButton("My Account", 104, false);
+            accountButton.Click += (s, e) => SetActiveModule("account");
+
+            var logoutButton = CreateProfileButton("Log Out", 90, true);
+            logoutButton.Click += LogoutButton_Click;
+
+            actions.Controls.Add(accountButton);
+            actions.Controls.Add(logoutButton);
+            layout.Controls.Add(actions, 0, 3);
+
+            var topLine = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 1,
+                BackColor = SidebarBorder
+            };
+
+            panel.Controls.Add(layout);
+            panel.Controls.Add(topLine);
+
+            RefreshProfile();
+            return panel;
+        }
+
+        private static Label CreateProfileLabel(Font font, Color color)
+        {
+            return new Label
+            {
+                Dock = DockStyle.Fill,
+                Font = font,
+                ForeColor = color,
+                AutoEllipsis = true,
+                UseMnemonic = false,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Margin = new Padding(0)
+            };
+        }
+
+        private Button CreateProfileButton(string text, int width, bool primary)
+        {
+            var button = new Button
+            {
+                Text = text,
+                Width = width,
+                Height = 30,
+                Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = primary ? SidebarActiveBg : SidebarBg,
+                ForeColor = primary ? Color.White : SidebarText,
+                Cursor = System.Windows.Forms.Cursors.Hand,
+                Margin = new Padding(0, 0, 8, 0)
+            };
+
+            button.FlatAppearance.BorderSize = primary ? 0 : 1;
+            button.FlatAppearance.BorderColor = SidebarBorder;
+            return button;
+        }
+
+        // Company from the current tenant; name and role from the signed-in session.
+        private void RefreshProfile()
+        {
+            var session = AuthSession.Current;
+            string name = session == null
+                ? string.Empty
+                : string.IsNullOrWhiteSpace(session.FullName) ? session.UserName : session.FullName;
+
+            _profileCompanyLabel.Text = _currentCompany.CompanyName.ToUpperInvariant();
+            _profileNameLabel.Text = name;
+            _profileRoleLabel.Text = AuthSession.Role;
+        }
+
+        private async void LogoutButton_Click(object? sender, EventArgs e)
+        {
+            if (MessageBox.Show(this, "Log out of FreshCrumbs?", "Log Out",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+            {
+                return;
+            }
+
+            if (sender is Button button)
+            {
+                button.Enabled = false;
+            }
+
+            await new ApiService().LogoutAsync();
+
+            LogoutRequested = true;
+            Close();
+        }
+
+        private void ShowMyAccount()
+        {
+            _contentPanel.Controls.Clear();
+
+            var accountControl = new MyAccountControl(RefreshProfile);
+            _contentPanel.Controls.Add(accountControl);
+        }
+
         private Button CreateNavButton(
             IconChar icon,
             string text,
@@ -311,13 +498,13 @@ namespace freshcrumbs.CRM.winforms.Forms
                 Text = "   " + text,
                 Tag = key,
                 Width = 220,
-                Height = 52,
+                Height = 42,
                 Font = new Font("Segoe UI", 11),
                 FlatStyle = FlatStyle.Flat,
                 BackColor = SidebarBg,
                 ForeColor = SidebarText,
                 Cursor = System.Windows.Forms.Cursors.Hand,
-                Margin = new Padding(0, 0, 0, 6),
+                Margin = new Padding(0, 0, 0, 4),
                 Padding = new Padding(0),
                 TextAlign = ContentAlignment.MiddleLeft,
                 ImageAlign = ContentAlignment.MiddleLeft,
@@ -406,6 +593,9 @@ namespace freshcrumbs.CRM.winforms.Forms
             };
 
             _topBarPanel.Controls.Add(_companyLabel);
+
+            // Online / Offline / Syncing indicator (hidden automatically when the API runs in cloud mode).
+            _topBarPanel.Controls.Add(new SyncStatusLabel { Dock = DockStyle.Left });
 
             RepositionCompanyLabel();
 
@@ -499,14 +689,12 @@ namespace freshcrumbs.CRM.winforms.Forms
                         isActive ? Color.White : SidebarText,
                         20);
                 }
+            }
 
-                if (!IsModuleAllowed(key))
-                {
-                    ShowPlaceholder("Not available", "Your current subscription plan does not include this module.");
-                    return;
-                }
-
-
+            if (!IsModuleAllowed(key))
+            {
+                ShowPlaceholder("Not available", GetNotAvailableMessage(key));
+                return;
             }
 
 
@@ -548,10 +736,16 @@ namespace freshcrumbs.CRM.winforms.Forms
                     ShowReportsManagement();
                     break;
 
-                case "settings":
-                    ShowPlaceholder(
-                        "Settings",
-                        "Not built yet.");
+                case "branches":
+                    ShowBranchManagement();
+                    break;
+
+                case "users":
+                    ShowUserManagement();
+                    break;
+
+                case "account":
+                    ShowMyAccount();
                     break;
             }
         }

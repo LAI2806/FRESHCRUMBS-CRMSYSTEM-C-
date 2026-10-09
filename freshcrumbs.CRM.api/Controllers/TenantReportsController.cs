@@ -1,6 +1,8 @@
 ﻿using System.Globalization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using freshcrumbs.CRM.api.Authorization;
+using freshcrumbs.CRM.api.Services;
 using freshcrumbs.CRM.infrastructure.data;
 using freshcrumbs.CRM.infrastructure.services;
 
@@ -78,11 +80,16 @@ namespace freshcrumbs.CRM.api.Controllers
             private List<InquiryRow>? _inquiries;
             private List<StockRow>? _activeProducts;
 
-            public MonthReport(TenantCrmDbContext db, DateTime start, DateTime end)
+            // branchId: null = company-wide; a PREMIUM MANAGER / STAFF passes their branch (NoBranch when not assigned = no data).
+            // Purchase-based figures then use that branch's sales; the customer records themselves stay shared.
+            private readonly int? _branchId;
+
+            public MonthReport(TenantCrmDbContext db, DateTime start, DateTime end, int? branchId = null)
             {
                 _db = db;
                 Start = start;
                 End = end;
+                _branchId = branchId;
             }
 
             public DateTime Start { get; }
@@ -121,13 +128,15 @@ namespace freshcrumbs.CRM.api.Controllers
             {
                 var start = Start;
                 var end = End;
+                var branchId = _branchId;
 
                 return _sales ??= await _db.SalesTransactions
                     .AsNoTracking()
                     .Where(x => !x.IsDeleted &&
                                 x.Status == "Completed" &&
                                 x.TransactionDate >= start &&
-                                x.TransactionDate < end)
+                                x.TransactionDate < end &&
+                                (branchId == null || x.BranchId == branchId))
                     .Select(x => new SaleRow(x.CustomerId, x.PromotionId, x.TransactionDate, x.FinalAmount, x.DiscountAmount))
                     .ToListAsync();
             }
@@ -136,6 +145,7 @@ namespace freshcrumbs.CRM.api.Controllers
             {
                 var start = Start;
                 var end = End;
+                var branchId = _branchId;
 
                 return _items ??= await _db.TransactionItems
                     .AsNoTracking()
@@ -143,7 +153,8 @@ namespace freshcrumbs.CRM.api.Controllers
                                  !ti.SalesTransaction.IsDeleted &&
                                  ti.SalesTransaction.Status == "Completed" &&
                                  ti.SalesTransaction.TransactionDate >= start &&
-                                 ti.SalesTransaction.TransactionDate < end)
+                                 ti.SalesTransaction.TransactionDate < end &&
+                                 (branchId == null || ti.SalesTransaction.BranchId == branchId))
                     .Select(ti => new ItemRow(
                         ti.ProductId,
                         ti.Product != null ? ti.Product.ProductName : string.Empty,
@@ -153,10 +164,14 @@ namespace freshcrumbs.CRM.api.Controllers
                     .ToListAsync();
             }
 
+            // Branch scope: company-wide promotions plus that branch's own promotions.
             public async Task<List<PromotionRow>> GetPromotionsAsync()
             {
+                var branchId = _branchId;
+
                 return _promotions ??= await _db.Promotions
                     .AsNoTracking()
+                    .Where(p => branchId != NoBranch && (branchId == null || p.BranchId == null || p.BranchId == branchId))
                     .Select(p => new PromotionRow(p.PromotionId, p.PromotionName, p.Status))
                     .ToListAsync();
             }
@@ -165,10 +180,12 @@ namespace freshcrumbs.CRM.api.Controllers
             {
                 var start = Start;
                 var end = End;
+                var branchId = _branchId;
 
                 return _feedback ??= await _db.Feedbacks
                     .AsNoTracking()
-                    .Where(x => !x.IsDeleted && x.DateSubmitted >= start && x.DateSubmitted < end)
+                    .Where(x => !x.IsDeleted && x.DateSubmitted >= start && x.DateSubmitted < end &&
+                                (branchId == null || x.BranchId == branchId))
                     .Select(x => new FeedbackRow(x.Type, x.Category, x.Status, x.DateSubmitted))
                     .ToListAsync();
             }
@@ -177,27 +194,58 @@ namespace freshcrumbs.CRM.api.Controllers
             {
                 var start = Start;
                 var end = End;
+                var branchId = _branchId;
 
                 return _inquiries ??= await _db.Inquiries
                     .AsNoTracking()
-                    .Where(x => !x.IsDeleted && x.DateSubmitted >= start && x.DateSubmitted < end)
+                    .Where(x => !x.IsDeleted && x.DateSubmitted >= start && x.DateSubmitted < end &&
+                                (branchId == null || x.BranchId == branchId))
                     .Select(x => new InquiryRow(x.Type, x.Status, x.RespondedAt, x.DateSubmitted))
                     .ToListAsync();
             }
 
+            // Branch scope: the stock held at that branch (BranchInventory), as in the Inventory report.
             public async Task<List<StockRow>> GetActiveProductsAsync()
             {
-                return _activeProducts ??= await _db.Products
+                if (_activeProducts != null)
+                {
+                    return _activeProducts;
+                }
+
+                if (_branchId == NoBranch)
+                {
+                    return _activeProducts = new List<StockRow>();
+                }
+
+                var products = await _db.Products
                     .AsNoTracking()
                     .Where(p => p.Status == "Active")
                     .Select(p => new StockRow(p.ProductId, p.ProductName, p.Quantity, p.ReorderLevel))
                     .ToListAsync();
+
+                if (_branchId != null)
+                {
+                    int branchId = _branchId.Value;
+
+                    var branchStock = await _db.BranchInventories
+                        .AsNoTracking()
+                        .Where(i => i.BranchId == branchId)
+                        .ToDictionaryAsync(i => i.ProductId, i => i.Quantity);
+
+                    products = products
+                        .Select(p => p with { Quantity = branchStock.TryGetValue(p.ProductId, out var quantity) ? quantity : 0 })
+                        .ToList();
+                }
+
+                return _activeProducts = products;
             }
 
+            // Branch scope: points earned/used on that branch's sales (manual adjustments have no branch).
             public async Task<(int Earned, int Used)> GetPointsAsync()
             {
                 var start = Start;
                 var end = End;
+                var branchId = _branchId;
 
                 var totals = await _db.LoyaltyTransactions
                     .AsNoTracking()
@@ -208,7 +256,9 @@ namespace freshcrumbs.CRM.api.Controllers
                                 (x.SalesTransactionId == null ||
                                  (x.SalesTransaction != null &&
                                   !x.SalesTransaction.IsDeleted &&
-                                  x.SalesTransaction.Status == "Completed")))
+                                  x.SalesTransaction.Status == "Completed")) &&
+                                (branchId == null ||
+                                 (x.SalesTransaction != null && x.SalesTransaction.BranchId == branchId)))
                     .GroupBy(x => 1)
                     .Select(g => new { Earned = g.Sum(x => x.PointsEarned), Used = g.Sum(x => x.PointsUsed) })
                     .FirstOrDefaultAsync();
@@ -220,13 +270,15 @@ namespace freshcrumbs.CRM.api.Controllers
             {
                 var previousStart = PreviousStart;
                 var start = Start;
+                var branchId = _branchId;
 
                 return await _db.SalesTransactions
                     .AsNoTracking()
                     .Where(x => !x.IsDeleted &&
                                 x.Status == "Completed" &&
                                 x.TransactionDate >= previousStart &&
-                                x.TransactionDate < start)
+                                x.TransactionDate < start &&
+                                (branchId == null || x.BranchId == branchId))
                     .SumAsync(x => x.FinalAmount);
             }
 
@@ -241,13 +293,16 @@ namespace freshcrumbs.CRM.api.Controllers
                 }
 
                 var start = Start;
+                var branchId = _branchId;
 
+                // Branch scope: "returning" means they bought at THIS branch before.
                 var returningIds = await _db.SalesTransactions
                     .AsNoTracking()
                     .Where(x => !x.IsDeleted &&
                                 x.Status == "Completed" &&
                                 x.TransactionDate < start &&
-                                customerIds.Contains(x.CustomerId))
+                                customerIds.Contains(x.CustomerId) &&
+                                (branchId == null || x.BranchId == branchId))
                     .Select(x => x.CustomerId)
                     .Distinct()
                     .ToListAsync();
@@ -255,18 +310,20 @@ namespace freshcrumbs.CRM.api.Controllers
                 return (customerIds.Count - returningIds.Count, returningIds.Count);
             }
 
+            // Branch scope: customers registered at that branch.
             public async Task<List<ChartPoint>> GetCustomerGrowthAsync()
             {
                 var start = Start;
                 var end = End;
+                var branchId = _branchId;
 
                 int running = await _db.Customers
                     .AsNoTracking()
-                    .CountAsync(c => c.CreatedAt < start);
+                    .CountAsync(c => c.CreatedAt < start && (branchId == null || c.BranchId == branchId));
 
                 var createdInMonth = await _db.Customers
                     .AsNoTracking()
-                    .Where(c => c.CreatedAt >= start && c.CreatedAt < end)
+                    .Where(c => c.CreatedAt >= start && c.CreatedAt < end && (branchId == null || c.BranchId == branchId))
                     .Select(c => c.CreatedAt)
                     .ToListAsync();
 
@@ -289,11 +346,17 @@ namespace freshcrumbs.CRM.api.Controllers
                 return points;
             }
 
+            // Branch scope: customers who completed a purchase at that branch (the balance shown is their shared balance).
             public async Task<List<ChartPoint>> GetTopLoyalCustomersAsync()
             {
-                var rows = await _db.Customers
+                var branchId = _branchId;
+                var db = _db;
+
+                var rows = await db.Customers
                     .AsNoTracking()
-                    .Where(c => c.Status == "Active" && c.LoyaltyPoints > 0)
+                    .Where(c => c.Status == "Active" && c.LoyaltyPoints > 0 &&
+                                (branchId == null || db.SalesTransactions.Any(s =>
+                                    s.CustomerId == c.CustomerId && s.BranchId == branchId && !s.IsDeleted && s.Status == "Completed")))
                     .OrderByDescending(c => c.LoyaltyPoints)
                     .Take(10)
                     .Select(c => new { Name = c.FirstName + " " + c.LastName, c.LoyaltyPoints })
@@ -618,52 +681,104 @@ namespace freshcrumbs.CRM.api.Controllers
 
             await using var tenantDb = await _tenantFactory.CreateAsync(companyId);
 
-            var report = new MonthReport(tenantDb, start, end);
+            bool management = HttpContext.HasTenantPermission(TenantPermissions.ViewManagementDashboard);
+            bool retention = HttpContext.HasTenantPermission(TenantPermissions.ViewRetentionDashboard);
+            bool promotionsVisible = retention || HttpContext.HasTenantPermission(TenantPermissions.UsePromotions);
+            bool feedbackVisible = HttpContext.HasTenantPermission(TenantPermissions.ReportPermission("feedback"));
+            bool inquiriesVisible = HttpContext.HasTenantPermission(TenantPermissions.ReportPermission("inquiries"));
 
-            var sales = await report.GetSalesAsync();
-            decimal totalSales = sales.Sum(x => x.FinalAmount);
-            int transactionCount = sales.Count;
-            decimal averageTransaction = transactionCount > 0 ? totalSales / transactionCount : 0;
+            int? branchId = await GetReportBranchAsync(tenantDb);
+            var report = new MonthReport(tenantDb, start, end, branchId);
 
-            var items = await report.GetItemsAsync();
-            int totalProductsSold = items.Sum(x => x.Quantity);
+            decimal totalSales = 0;
+            int transactionCount = 0;
+            decimal averageTransaction = 0;
+            int totalProductsSold = 0;
+            decimal previousPeriodSales = 0;
 
-            int totalCustomers = await tenantDb.Customers
-                .AsNoTracking()
-                .CountAsync(x => x.Status == "Active");
+            if (management)
+            {
+                var sales = await report.GetSalesAsync();
+                totalSales = sales.Sum(x => x.FinalAmount);
+                transactionCount = sales.Count;
+                averageTransaction = transactionCount > 0 ? totalSales / transactionCount : 0;
 
-            int newCustomers = await tenantDb.Customers
-                .AsNoTracking()
-                .CountAsync(x => x.CreatedAt >= DateTime.UtcNow.AddDays(-30));
+                var items = await report.GetItemsAsync();
+                totalProductsSold = items.Sum(x => x.Quantity);
 
-            var customerTransactionCounts = await tenantDb.SalesTransactions
-                .AsNoTracking()
-                .Where(x => !x.IsDeleted && x.Status == "Completed")
-                .GroupBy(x => x.CustomerId)
-                .Select(g => g.Count())
-                .ToListAsync();
+                previousPeriodSales = await report.GetPreviousMonthSalesAsync();
+            }
 
-            int customersWithPurchases = customerTransactionCounts.Count;
-            int repeatCustomers = customerTransactionCounts.Count(c => c > 1);
-            double repeatRate = customersWithPurchases > 0
-                ? Math.Round(repeatCustomers * 100.0 / customersWithPurchases, 1)
+            var activeCustomerQuery = tenantDb.Customers.AsNoTracking().Where(x => x.Status == "Active");
+
+            if (branchId != null)
+            {
+                activeCustomerQuery = BranchStock.AssociatedWith(activeCustomerQuery, tenantDb, branchId.Value);
+            }
+
+            int totalCustomers = await activeCustomerQuery.CountAsync();
+
+            int newCustomers = management
+                ? await tenantDb.Customers
+                    .AsNoTracking()
+                    .CountAsync(x => x.CreatedAt >= DateTime.UtcNow.AddDays(-30) && (branchId == null || x.BranchId == branchId))
                 : 0;
 
-            var promotions = await report.GetPromotionsAsync();
-            int totalActivePromotions = promotions.Count(p => IsActive(p.Status));
+            double repeatRate = 0;
 
-            var (earnedPoints, usedPoints) = await report.GetPointsAsync();
+            if (retention)
+            {
+                var customerTransactionCounts = await tenantDb.SalesTransactions
+                    .AsNoTracking()
+                    .Where(x => !x.IsDeleted && x.Status == "Completed" && (branchId == null || x.BranchId == branchId))
+                    .GroupBy(x => x.CustomerId)
+                    .Select(g => g.Count())
+                    .ToListAsync();
 
-            decimal previousPeriodSales = await report.GetPreviousMonthSalesAsync();
+                int customersWithPurchases = customerTransactionCounts.Count;
+                int repeatCustomers = customerTransactionCounts.Count(c => c > 1);
+                repeatRate = customersWithPurchases > 0
+                    ? Math.Round(repeatCustomers * 100.0 / customersWithPurchases, 1)
+                    : 0;
+            }
 
-            var feedback = await report.GetFeedbackAsync();
-            int resolvedFeedback = feedback.Count(f => !IsComplaint(f) && IsStatus(f.Status, ResolvedStatus));
-            int resolvedComplaints = feedback.Count(f => IsComplaint(f) && IsStatus(f.Status, ResolvedStatus));
-            double resolutionRate = Rate(resolvedFeedback + resolvedComplaints, feedback.Count);
+            int totalActivePromotions = 0;
 
-            var inquiries = await report.GetInquiriesAsync();
-            int respondedInquiries = inquiries.Count(i => i.RespondedAt != null);
-            double responseRate = Rate(respondedInquiries, inquiries.Count);
+            if (promotionsVisible)
+            {
+                var promotions = await report.GetPromotionsAsync();
+                totalActivePromotions = promotions.Count(p => IsActive(p.Status));
+            }
+
+            int earnedPoints = 0;
+            int usedPoints = 0;
+
+            if (retention)
+            {
+                (earnedPoints, usedPoints) = await report.GetPointsAsync();
+            }
+
+            int resolvedFeedback = 0;
+            int resolvedComplaints = 0;
+            double resolutionRate = 0;
+
+            if (management && feedbackVisible)
+            {
+                var feedback = await report.GetFeedbackAsync();
+                resolvedFeedback = feedback.Count(f => !IsComplaint(f) && IsStatus(f.Status, ResolvedStatus));
+                resolvedComplaints = feedback.Count(f => IsComplaint(f) && IsStatus(f.Status, ResolvedStatus));
+                resolutionRate = Rate(resolvedFeedback + resolvedComplaints, feedback.Count);
+            }
+
+            int respondedInquiries = 0;
+            double responseRate = 0;
+
+            if (management && inquiriesVisible)
+            {
+                var inquiries = await report.GetInquiriesAsync();
+                respondedInquiries = inquiries.Count(i => i.RespondedAt != null);
+                responseRate = Rate(respondedInquiries, inquiries.Count);
+            }
 
             return Ok(new
             {
@@ -687,6 +802,7 @@ namespace freshcrumbs.CRM.api.Controllers
         }
 
         [HttpGet("insights")]
+        [RequireTenantPermission(TenantPermissions.ViewRetentionDashboard)]
         public async Task<IActionResult> GetInsights(int companyId, int? year = null, int? month = null, DateTime? startDate = null, DateTime? endDate = null)
         {
             if (!TryGetReportRange(year, month, startDate, endDate, out var start, out var end, out var rangeError))
@@ -696,7 +812,7 @@ namespace freshcrumbs.CRM.api.Controllers
 
             await using var tenantDb = await _tenantFactory.CreateAsync(companyId);
 
-            var report = new MonthReport(tenantDb, start, end);
+            var report = new MonthReport(tenantDb, start, end, await GetReportBranchAsync(tenantDb));
             var insights = new List<ReportInsight>();
             string monthLabel = report.Label;
             string thisPeriod = report.ThisPeriod;
@@ -991,40 +1107,66 @@ namespace freshcrumbs.CRM.api.Controllers
 
             await using var tenantDb = await _tenantFactory.CreateAsync(companyId);
 
-            var report = new MonthReport(tenantDb, start, end);
+            var report = new MonthReport(tenantDb, start, end, await GetReportBranchAsync(tenantDb));
 
-            var customerGrowth = await report.GetCustomerGrowthAsync();
-            var (newCustomers, returningCustomers) = await report.GetNewVsReturningAsync();
-            var newVsReturning = new List<ChartPoint>
+            bool management = HttpContext.HasTenantPermission(TenantPermissions.ViewManagementDashboard);
+            bool retention = HttpContext.HasTenantPermission(TenantPermissions.ViewRetentionDashboard);
+            bool feedbackVisible = management && HttpContext.HasTenantPermission(TenantPermissions.ReportPermission("feedback"));
+            bool inquiriesVisible = management && HttpContext.HasTenantPermission(TenantPermissions.ReportPermission("inquiries"));
+
+            async Task<List<ChartPoint>> Load(bool allowed, Func<Task<List<ChartPoint>>> source)
             {
-                new ChartPoint { Label = "New Customers", Value = newCustomers },
-                new ChartPoint { Label = "Returning Customers", Value = returningCustomers }
-            };
-            var topLoyalCustomers = await report.GetTopLoyalCustomersAsync();
+                return allowed ? await source() : new List<ChartPoint>();
+            }
 
-            var productPerformance = await report.GetTopProductsAsync();
-            var salesByCategory = await report.GetSalesByCategoryAsync();
+            var customerGrowth = await Load(management, report.GetCustomerGrowthAsync);
+            var newVsReturning = new List<ChartPoint>();
+
+            if (retention)
+            {
+                var (newCustomers, returningCustomers) = await report.GetNewVsReturningAsync();
+                newVsReturning.Add(new ChartPoint { Label = "New Customers", Value = newCustomers });
+                newVsReturning.Add(new ChartPoint { Label = "Returning Customers", Value = returningCustomers });
+            }
+
+            var topLoyalCustomers = await Load(retention, report.GetTopLoyalCustomersAsync);
+
+            var productPerformance = await Load(management, report.GetTopProductsAsync);
+            var salesByCategory = await Load(management, report.GetSalesByCategoryAsync);
             var productStock = await report.GetProductStockAsync();
 
-            var salesTrend = await report.GetSalesTrendAsync();
-            var salesByPromotion = await report.GetSalesByPromotionAsync();
-            var discountByPromotion = await report.GetDiscountByPromotionAsync();
+            var salesTrend = await Load(management, report.GetSalesTrendAsync);
+            var salesByPromotion = await Load(retention, report.GetSalesByPromotionAsync);
+            var discountByPromotion = await Load(retention, report.GetDiscountByPromotionAsync);
 
-            var promotionStatus = await report.GetPromotionStatusAsync();
-            var promotionUsage = await report.GetPromotionUsageAsync();
+            var promotionStatus = await Load(retention, report.GetPromotionStatusAsync);
+            var promotionUsage = await Load(retention, report.GetPromotionUsageAsync);
 
-            var feedback = await report.GetFeedbackAsync();
-            var complaintsByCategory = CountByCategory(feedback.Where(IsComplaint));
-            var feedbackByCategory = CountByCategory(feedback.Where(f => !IsComplaint(f)));
-            var feedbackTrend = report.GetDailyCounts(feedback.Select(f => f.Date));
+            var complaintsByCategory = new List<ChartPoint>();
+            var feedbackByCategory = new List<ChartPoint>();
+            var feedbackTrend = new List<ChartPoint>();
 
-            var inquiries = await report.GetInquiriesAsync();
-            var inquiryTrend = report.GetDailyCounts(inquiries.Select(i => i.Date));
-            var inquiryTypes = inquiries
-                .GroupBy(i => LabelOrDefault(i.Type, "Unspecified"), StringComparer.OrdinalIgnoreCase)
-                .Select(g => new ChartPoint { Label = g.Key, Value = g.Count() })
-                .OrderByDescending(p => p.Value)
-                .ToList();
+            if (feedbackVisible)
+            {
+                var feedback = await report.GetFeedbackAsync();
+                complaintsByCategory = CountByCategory(feedback.Where(IsComplaint));
+                feedbackByCategory = CountByCategory(feedback.Where(f => !IsComplaint(f)));
+                feedbackTrend = report.GetDailyCounts(feedback.Select(f => f.Date));
+            }
+
+            var inquiryTrend = new List<ChartPoint>();
+            var inquiryTypes = new List<ChartPoint>();
+
+            if (inquiriesVisible)
+            {
+                var inquiries = await report.GetInquiriesAsync();
+                inquiryTrend = report.GetDailyCounts(inquiries.Select(i => i.Date));
+                inquiryTypes = inquiries
+                    .GroupBy(i => LabelOrDefault(i.Type, "Unspecified"), StringComparer.OrdinalIgnoreCase)
+                    .Select(g => new ChartPoint { Label = g.Key, Value = g.Count() })
+                    .OrderByDescending(p => p.Value)
+                    .ToList();
+            }
 
             return Ok(new
             {
@@ -1060,32 +1202,65 @@ namespace freshcrumbs.CRM.api.Controllers
             DateTime monthEnd = monthStart.AddMonths(1);
             DateTime overviewStart = today.AddDays(-6);
 
-            int activeCustomers = await tenantDb.Customers
-                .AsNoTracking()
-                .CountAsync(c => c.Status == "Active");
+            // PREMIUM MANAGER / STAFF: sales, customer activity, loyalty activity and stock cover their branch only
+            // (no branch assigned = nothing). ADMIN and non-branching plans stay company-wide.
+            var scope = await BranchStock.GetScopeAsync(HttpContext, tenantDb);
+            bool branchOnly = scope.Restricted;
+            int scopeBranchId = scope.BranchId ?? -1;
+
+            var activeCustomerQuery = tenantDb.Customers.AsNoTracking().Where(c => c.Status == "Active");
+
+            if (branchOnly)
+            {
+                activeCustomerQuery = BranchStock.AssociatedWith(activeCustomerQuery, tenantDb, scopeBranchId);
+            }
+
+            int activeCustomers = await activeCustomerQuery.CountAsync();
 
             int activeProducts = await tenantDb.Products
                 .AsNoTracking()
                 .CountAsync(p => p.Status == "Active");
 
-            decimal todaysSales = await tenantDb.SalesTransactions
+            var todaysCompletedSales = tenantDb.SalesTransactions
                 .AsNoTracking()
                 .Where(x => !x.IsDeleted &&
                             x.Status == "Completed" &&
                             x.TransactionDate >= today &&
-                            x.TransactionDate < tomorrow)
-                .SumAsync(x => (decimal?)x.FinalAmount) ?? 0m;
+                            x.TransactionDate < tomorrow &&
+                            (!branchOnly || x.BranchId == scopeBranchId));
 
-            var lowStockProducts = await tenantDb.Products
-                .AsNoTracking()
-                .Where(p => p.Status == "Active" && p.Quantity <= p.ReorderLevel)
-                .OrderBy(p => p.Quantity)
-                .Select(p => new { p.ProductName, p.Quantity, p.ReorderLevel })
-                .ToListAsync();
+            decimal todaysSales = await todaysCompletedSales.SumAsync(x => (decimal?)x.FinalAmount) ?? 0m;
+            int todaysTransactions = await todaysCompletedSales.CountAsync();
+
+            // Branch scope: the branch's own stock (BranchInventory), as in the Inventory report.
+            bool hasBranch = scope.BranchId != null;
+
+            var lowStockProducts = branchOnly
+                ? await tenantDb.Products
+                    .AsNoTracking()
+                    .Where(p => hasBranch && p.Status == "Active")
+                    .Select(p => new
+                    {
+                        p.ProductName,
+                        Quantity = tenantDb.BranchInventories
+                            .Where(i => i.BranchId == scopeBranchId && i.ProductId == p.ProductId)
+                            .Select(i => i.Quantity)
+                            .FirstOrDefault(),
+                        p.ReorderLevel
+                    })
+                    .Where(p => p.Quantity <= p.ReorderLevel)
+                    .OrderBy(p => p.Quantity)
+                    .ToListAsync()
+                : await tenantDb.Products
+                    .AsNoTracking()
+                    .Where(p => p.Status == "Active" && p.Quantity <= p.ReorderLevel)
+                    .OrderBy(p => p.Quantity)
+                    .Select(p => new { p.ProductName, p.Quantity, p.ReorderLevel })
+                    .ToListAsync();
 
             var recentSalesRaw = await tenantDb.SalesTransactions
                 .AsNoTracking()
-                .Where(x => !x.IsDeleted && x.Status == "Completed")
+                .Where(x => !x.IsDeleted && x.Status == "Completed" && (!branchOnly || x.BranchId == scopeBranchId))
                 .OrderByDescending(x => x.TransactionDate)
                 .Take(5)
                 .Select(x => new { x.CustomerId, x.FinalAmount, x.PaymentMethod, x.Status })
@@ -1116,7 +1291,8 @@ namespace freshcrumbs.CRM.api.Controllers
                 .Where(x => !x.IsDeleted &&
                             x.Status == "Completed" &&
                             x.TransactionDate >= overviewStart &&
-                            x.TransactionDate < tomorrow)
+                            x.TransactionDate < tomorrow &&
+                            (!branchOnly || x.BranchId == scopeBranchId))
                 .Select(x => new { x.TransactionDate, x.FinalAmount })
                 .ToListAsync();
 
@@ -1136,37 +1312,656 @@ namespace freshcrumbs.CRM.api.Controllers
                 });
             }
 
-            int newCustomersThisMonth = await tenantDb.Customers
-                .AsNoTracking()
-                .CountAsync(c => c.CreatedAt >= monthStart && c.CreatedAt < monthEnd);
+            bool management = HttpContext.HasTenantPermission(TenantPermissions.ViewManagementDashboard);
+            bool retention = HttpContext.HasTenantPermission(TenantPermissions.ViewRetentionDashboard);
+            bool company = HttpContext.HasTenantPermission(TenantPermissions.ViewCompanyDashboard);
 
-            int activeCustomersThisMonth = await tenantDb.SalesTransactions
-                .AsNoTracking()
-                .Where(x => !x.IsDeleted &&
-                            x.Status == "Completed" &&
-                            x.TransactionDate >= monthStart &&
-                            x.TransactionDate < monthEnd)
-                .Select(x => x.CustomerId)
-                .Distinct()
-                .CountAsync();
+            int newCustomersThisMonth = 0;
+            int activeCustomersThisMonth = 0;
 
-            int loyaltyActivityThisMonth = await tenantDb.LoyaltyTransactions
-                .AsNoTracking()
-                .CountAsync(x => !x.IsDeleted && x.Date >= monthStart && x.Date < monthEnd);
+            if (management)
+            {
+                newCustomersThisMonth = await tenantDb.Customers
+                    .AsNoTracking()
+                    .CountAsync(c => c.CreatedAt >= monthStart && c.CreatedAt < monthEnd &&
+                                     (!branchOnly || c.BranchId == scopeBranchId));
+
+                activeCustomersThisMonth = await tenantDb.SalesTransactions
+                    .AsNoTracking()
+                    .Where(x => !x.IsDeleted &&
+                                x.Status == "Completed" &&
+                                x.TransactionDate >= monthStart &&
+                                x.TransactionDate < monthEnd &&
+                                (!branchOnly || x.BranchId == scopeBranchId))
+                    .Select(x => x.CustomerId)
+                    .Distinct()
+                    .CountAsync();
+            }
+
+            int loyaltyActivityThisMonth = retention
+                ? await tenantDb.LoyaltyTransactions
+                    .AsNoTracking()
+                    .CountAsync(x => !x.IsDeleted && x.Date >= monthStart && x.Date < monthEnd &&
+                                     (!branchOnly || (x.SalesTransaction != null && x.SalesTransaction.BranchId == scopeBranchId)))
+                : 0;
+
+            object? companySummary = null;
+
+            if (company)
+            {
+                var monthSales = tenantDb.SalesTransactions
+                    .AsNoTracking()
+                    .Where(x => !x.IsDeleted &&
+                                x.TransactionDate >= monthStart &&
+                                x.TransactionDate < monthEnd);
+
+                decimal customerDiscounts = await monthSales
+                    .Where(x => x.Status == "Completed")
+                    .SumAsync(x => (decimal?)x.CustomerDiscountAmount) ?? 0m;
+
+                decimal promotionDiscounts = retention
+                    ? await monthSales
+                        .Where(x => x.Status == "Completed")
+                        .SumAsync(x => (decimal?)x.DiscountAmount) ?? 0m
+                    : 0m;
+
+                int cancelledTransactions = await monthSales.CountAsync(x => x.Status == "Cancelled");
+
+                decimal inventoryValue = await tenantDb.Products
+                    .AsNoTracking()
+                    .Where(p => p.Status == "Active")
+                    .SumAsync(p => (decimal?)(p.Price * p.Quantity)) ?? 0m;
+
+                int outstandingPoints = retention
+                    ? await tenantDb.Customers
+                        .AsNoTracking()
+                        .Where(c => c.Status == "Active")
+                        .SumAsync(c => (int?)c.LoyaltyPoints) ?? 0
+                    : 0;
+
+                companySummary = new
+                {
+                    DiscountsGivenThisMonth = customerDiscounts + promotionDiscounts,
+                    CancelledTransactionsThisMonth = cancelledTransactions,
+                    InventoryValue = inventoryValue,
+                    OutstandingLoyaltyPoints = outstandingPoints
+                };
+            }
 
             return Ok(new
             {
                 ActiveCustomers = activeCustomers,
                 ActiveProducts = activeProducts,
                 TodaysSales = todaysSales,
+                TodaysTransactions = todaysTransactions,
                 LowStockCount = lowStockProducts.Count,
                 RecentSales = recentSales,
                 LowStockProducts = lowStockProducts,
                 SalesOverview = salesOverview,
                 NewCustomersThisMonth = newCustomersThisMonth,
                 ActiveCustomersThisMonth = activeCustomersThisMonth,
-                LoyaltyActivityThisMonth = loyaltyActivityThisMonth
+                LoyaltyActivityThisMonth = loyaltyActivityThisMonth,
+                Company = companySummary
             });
+        }
+
+        // Operational reports (every role, every plan): read-only figures for daily bakery work, limited to the modules
+        // the user can open. PREMIUM MANAGER / STAFF: their assigned branch only (NoBranch = nothing); ADMIN and plans
+        // without branches: company-wide. Purchases count only Completed, non-deleted sales. No retention, discount or
+        // insight analytics are included: those stay in the management reports.
+        [HttpGet("operations")]
+        [RequireTenantPermission(TenantPermissions.ViewOperationalReports)]
+        public async Task<IActionResult> GetOperationalReport(int companyId, DateTime? startDate = null, DateTime? endDate = null)
+        {
+            if (!TryGetReportRange(null, null, startDate, endDate, out var start, out var end, out var rangeError))
+            {
+                return BadRequest(rangeError);
+            }
+
+            await using var tenantDb = await _tenantFactory.CreateAsync(companyId);
+
+            int? branchId = await GetReportBranchAsync(tenantDb);
+            var report = new MonthReport(tenantDb, start, end, branchId);
+
+            bool dataCollection = HttpContext.GetTenantFeatures().Contains(freshcrumbs.CRM.domain.entities.PlanFeatureKeys.DataCollection, StringComparer.OrdinalIgnoreCase);
+            bool productsVisible = HttpContext.HasTenantPermission(TenantPermissions.ViewProducts);
+            bool promotionsVisible = HttpContext.HasTenantPermission(TenantPermissions.UsePromotions);
+            bool loyaltyVisible = HttpContext.HasTenantPermission(TenantPermissions.UseLoyalty);
+
+            var sales = await report.GetSalesAsync();
+            decimal totalSales = sales.Sum(s => s.FinalAmount);
+
+            var recentSales = await tenantDb.SalesTransactions
+                .AsNoTracking()
+                .Where(x => !x.IsDeleted &&
+                            x.Status == "Completed" &&
+                            x.TransactionDate >= start &&
+                            x.TransactionDate < end &&
+                            (branchId == null || x.BranchId == branchId))
+                .OrderByDescending(x => x.TransactionDate)
+                .Take(10)
+                .Select(x => new { x.TransactionDate, x.CustomerId, x.FinalAmount, x.PaymentMethod })
+                .ToListAsync();
+
+            var customerActivity = sales
+                .GroupBy(s => s.CustomerId)
+                .Select(g => new { CustomerId = g.Key, Purchases = g.Count(), LastPurchase = g.Max(s => s.Date) })
+                .OrderByDescending(x => x.LastPurchase)
+                .ToList();
+
+            int newCustomers = await tenantDb.Customers
+                .AsNoTracking()
+                .CountAsync(c => c.CreatedAt >= start && c.CreatedAt < end && (branchId == null || c.BranchId == branchId));
+
+            var recentFeedback = dataCollection
+                ? await tenantDb.Feedbacks
+                    .AsNoTracking()
+                    .Where(x => !x.IsDeleted && x.DateSubmitted >= start && x.DateSubmitted < end && (branchId == null || x.BranchId == branchId))
+                    .OrderByDescending(x => x.DateSubmitted)
+                    .Take(10)
+                    .Select(x => new { x.DateSubmitted, x.CustomerId, x.Type, x.Category, x.Status })
+                    .ToListAsync()
+                : new();
+
+            var recentInquiries = dataCollection
+                ? await tenantDb.Inquiries
+                    .AsNoTracking()
+                    .Where(x => !x.IsDeleted && x.DateSubmitted >= start && x.DateSubmitted < end && (branchId == null || x.BranchId == branchId))
+                    .OrderByDescending(x => x.DateSubmitted)
+                    .Take(10)
+                    .Select(x => new { x.DateSubmitted, x.CustomerId, x.Type, x.Subject, x.Status })
+                    .ToListAsync()
+                : new();
+
+            var customerIds = recentSales.Select(s => s.CustomerId)
+                .Concat(customerActivity.Take(10).Select(c => c.CustomerId))
+                .Concat(recentFeedback.Select(f => f.CustomerId))
+                .Concat(recentInquiries.Select(i => i.CustomerId))
+                .Distinct()
+                .ToList();
+
+            var customers = await tenantDb.Customers
+                .AsNoTracking()
+                .Where(c => customerIds.Contains(c.CustomerId))
+                .Select(c => new { c.CustomerId, c.CustomerCode, Name = (c.FirstName + " " + c.LastName).Trim() })
+                .ToDictionaryAsync(c => c.CustomerId);
+
+            string CustomerName(int id) => customers.TryGetValue(id, out var c) ? c.Name : $"Customer #{id}";
+
+            object? products = null;
+
+            if (productsVisible)
+            {
+                var stock = await report.GetActiveProductsAsync();
+                var lowStock = stock
+                    .Where(p => p.Quantity <= p.ReorderLevel)
+                    .OrderBy(p => p.Quantity)
+                    .ThenBy(p => p.Name)
+                    .ToList();
+
+                products = new
+                {
+                    ActiveProducts = stock.Count,
+                    LowStockCount = lowStock.Count,
+                    LowStock = lowStock.Take(10).Select(p => new { p.Name, p.Quantity, p.ReorderLevel }),
+                    TopProducts = await report.GetTopProductsAsync()
+                };
+            }
+
+            object? feedback = null;
+            object? inquiries = null;
+
+            if (dataCollection)
+            {
+                var feedbackRows = await report.GetFeedbackAsync();
+
+                feedback = new
+                {
+                    Total = feedbackRows.Count,
+                    Complaints = feedbackRows.Count(IsComplaint),
+                    Open = feedbackRows.Count(f => !IsStatus(f.Status, ResolvedStatus)),
+                    ByCategory = CountByCategory(feedbackRows),
+                    Recent = recentFeedback.Select(f => new
+                    {
+                        Date = f.DateSubmitted,
+                        Customer = CustomerName(f.CustomerId),
+                        f.Type,
+                        f.Category,
+                        f.Status
+                    })
+                };
+
+                var inquiryRows = await report.GetInquiriesAsync();
+
+                inquiries = new
+                {
+                    Total = inquiryRows.Count,
+                    Responded = inquiryRows.Count(i => i.RespondedAt != null),
+                    Pending = inquiryRows.Count(i => i.RespondedAt == null),
+                    ByStatus = inquiryRows
+                        .GroupBy(i => LabelOrDefault(i.Status, PendingStatus), StringComparer.OrdinalIgnoreCase)
+                        .Select(g => new ChartPoint { Label = g.Key, Value = g.Count() })
+                        .OrderByDescending(p => p.Value)
+                        .ToList(),
+                    Recent = recentInquiries.Select(i => new
+                    {
+                        Date = i.DateSubmitted,
+                        Customer = CustomerName(i.CustomerId),
+                        i.Type,
+                        i.Subject,
+                        i.Status
+                    })
+                };
+            }
+
+            object? promotions = null;
+
+            if (promotionsVisible)
+            {
+                var promotionRows = await report.GetPromotionsAsync();
+
+                promotions = new
+                {
+                    ActivePromotions = promotionRows.Count(p => IsActive(p.Status)),
+                    SalesWithPromotion = sales.Count(s => s.PromotionId != null),
+                    Usage = (await report.GetPromotionUsageAsync()).Where(p => p.Value > 0).ToList()
+                };
+            }
+
+            object? loyalty = null;
+
+            if (loyaltyVisible)
+            {
+                var (earned, used) = await report.GetPointsAsync();
+                loyalty = new { PointsEarned = earned, PointsUsed = used };
+            }
+
+            string? branchName = branchId is > 0
+                ? await tenantDb.Branches.AsNoTracking().Where(b => b.BranchId == branchId).Select(b => b.BranchName).FirstOrDefaultAsync()
+                : null;
+
+            return Ok(new
+            {
+                Period = report.Label,
+                BranchScoped = branchId != null,
+                BranchName = branchName,
+                Sales = new
+                {
+                    TotalSales = totalSales,
+                    Transactions = sales.Count,
+                    AverageSale = sales.Count > 0 ? Math.Round(totalSales / sales.Count, 2) : 0m,
+                    Trend = await report.GetSalesTrendAsync(),
+                    Recent = recentSales.Select(s => new
+                    {
+                        Date = s.TransactionDate,
+                        Customer = CustomerName(s.CustomerId),
+                        s.FinalAmount,
+                        s.PaymentMethod
+                    })
+                },
+                Customers = new
+                {
+                    ActiveCustomers = customerActivity.Count,
+                    NewCustomers = newCustomers,
+                    Recent = customerActivity.Take(10).Select(c => new
+                    {
+                        Code = customers.TryGetValue(c.CustomerId, out var info) ? info.CustomerCode : string.Empty,
+                        Name = CustomerName(c.CustomerId),
+                        c.LastPurchase,
+                        c.Purchases
+                    })
+                },
+                Products = products,
+                Feedback = feedback,
+                Inquiries = inquiries,
+                Promotions = promotions,
+                Loyalty = loyalty
+            });
+        }
+
+        // Generated "Business Summary": one table of the key figures of the period, built from MonthReport.
+        // ADMIN: company-wide; PREMIUM MANAGER: their branch (branchId), like every generated report.
+        private async Task<GeneratedReport> BuildBusinessSummaryReportAsync(TenantCrmDbContext db, DateTime start, DateTime end, int? branchId, string period)
+        {
+            var report = NewReport("business-summary", "Business Summary Report", period,
+                Col("Section"), Col("Metric"), Col("Value"));
+
+            void Add(string section, string metric, string value) => report.Rows.Add(new List<string> { section, metric, value });
+
+            var month = new MonthReport(db, start, end, branchId);
+
+            var sales = await month.GetSalesAsync();
+            decimal total = sales.Sum(s => s.FinalAmount);
+            decimal previous = await month.GetPreviousMonthSalesAsync();
+
+            Add("Sales", "Total sales", FormatPeso(total));
+            Add("Sales", "Transactions", ReportCount(sales.Count));
+            Add("Sales", "Average transaction", FormatPeso(sales.Count > 0 ? Math.Round(total / sales.Count, 2) : 0m));
+            Add("Sales", "Previous period (" + month.PreviousLabel + ")", FormatPeso(previous));
+            Add("Sales", "Change vs previous period",
+                previous > 0 ? Math.Round((double)((total - previous) * 100m / previous), 1).ToString("0.0", CultureInfo.InvariantCulture) + "%" : "n/a");
+
+            var items = await month.GetItemsAsync();
+            Add("Products", "Units sold", ReportCount(items.Sum(i => i.Quantity)));
+
+            var topProducts = (await month.GetTopProductsAsync()).Take(5).ToList();
+
+            foreach (var product in topProducts)
+            {
+                Add("Products", "Top seller: " + product.Label, ReportCount((int)product.Value) + " sold");
+            }
+
+            var stock = await month.GetActiveProductsAsync();
+            Add("Stock", "Active products", ReportCount(stock.Count));
+            Add("Stock", "At or below reorder level", ReportCount(stock.Count(p => p.Quantity <= p.ReorderLevel)));
+
+            var (newCount, returningCount) = await month.GetNewVsReturningAsync();
+            int purchasing = newCount + returningCount;
+            int repeat = sales.GroupBy(s => s.CustomerId).Count(g => g.Count() > 1);
+            int registered = await db.Customers
+                .AsNoTracking()
+                .CountAsync(c => c.CreatedAt >= start && c.CreatedAt < end && (branchId == null || c.BranchId == branchId));
+
+            Add("Customers", "Purchasing customers", ReportCount(purchasing));
+            Add("Customers", "New (first purchase)", ReportCount(newCount));
+            Add("Customers", "Returning", $"{ReportCount(returningCount)} ({Rate(returningCount, purchasing)}%)");
+            Add("Customers", "Bought 2+ times in the period", $"{ReportCount(repeat)} ({Rate(repeat, purchasing)}%)");
+            Add("Customers", "New registrations", ReportCount(registered));
+
+            if (HttpContext.HasTenantPermission(TenantPermissions.UseLoyalty))
+            {
+                var (earned, used) = await month.GetPointsAsync();
+                Add("Loyalty", "Points earned", ReportCount(earned));
+                Add("Loyalty", "Points used", ReportCount(used));
+            }
+
+            if (HttpContext.HasTenantPermission(TenantPermissions.UsePromotions))
+            {
+                var promotions = await month.GetPromotionsAsync();
+                Add("Promotions", "Active promotions", ReportCount(promotions.Count(p => IsActive(p.Status))));
+                Add("Promotions", "Sales using a promotion", ReportCount(sales.Count(s => s.PromotionId != null)));
+                Add("Promotions", "Promotion discounts given", FormatPeso(sales.Sum(s => s.DiscountAmount)));
+
+                foreach (var usage in (await month.GetPromotionUsageAsync()).Where(p => p.Value > 0).Take(5))
+                {
+                    Add("Promotions", "Used: " + usage.Label, Plural((int)usage.Value, "time", "times"));
+                }
+            }
+
+            if (HttpContext.HasTenantPermission(TenantPermissions.ReportPermission("feedback")))
+            {
+                var feedback = await month.GetFeedbackAsync();
+                int resolved = feedback.Count(f => IsStatus(f.Status, ResolvedStatus));
+                Add("Feedback", "Feedback received", ReportCount(feedback.Count));
+                Add("Feedback", "Complaints", ReportCount(feedback.Count(IsComplaint)));
+                Add("Feedback", "Resolved", $"{ReportCount(resolved)} ({Rate(resolved, feedback.Count)}%)");
+            }
+
+            if (HttpContext.HasTenantPermission(TenantPermissions.ReportPermission("inquiries")))
+            {
+                var inquiries = await month.GetInquiriesAsync();
+                int responded = inquiries.Count(i => i.RespondedAt != null);
+                Add("Inquiries", "Inquiries received", ReportCount(inquiries.Count));
+                Add("Inquiries", "Responded", $"{ReportCount(responded)} ({Rate(responded, inquiries.Count)}%)");
+            }
+
+            if (previous > 0)
+            {
+                Add("Insights", "Sales trend", total >= previous
+                    ? $"Sales were up {FormatPeso(total - previous)} on {month.PreviousLabel}."
+                    : $"Sales were down {FormatPeso(previous - total)} on {month.PreviousLabel}.");
+            }
+
+            if (topProducts.Count > 0)
+            {
+                Add("Insights", "Best seller", $"{topProducts[0].Label} led product sales with {ReportCount((int)topProducts[0].Value)} units.");
+            }
+
+            if (purchasing > 0)
+            {
+                Add("Insights", "Customer mix", Rate(returningCount, purchasing) >= 50
+                    ? "Most purchasing customers had bought before: repeat engagement is healthy."
+                    : "Most purchasing customers were buying for the first time: consider a follow-up or loyalty incentive.");
+            }
+
+            return report;
+        }
+
+        // Overview / Insights / Charts: PREMIUM MANAGER / STAFF see their branch's purchase activity (NoBranch when not
+        // assigned = no data); ADMIN and non-branching plans stay company-wide.
+        private const int NoBranch = -1;
+
+        private async Task<int?> GetReportBranchAsync(TenantCrmDbContext tenantDb)
+        {
+            var scope = await BranchStock.GetScopeAsync(HttpContext, tenantDb);
+            return scope.Restricted ? scope.BranchId ?? NoBranch : null;
+        }
+
+        private sealed record BranchRow(int BranchId, string BranchName, string Status);
+
+        private sealed record BranchSaleRow(int? BranchId, int CustomerId, decimal FinalAmount, DateTime Date);
+
+        private sealed class BranchBiRow
+        {
+            public int? BranchId { get; set; }
+            public string BranchName { get; set; } = string.Empty;
+            public string Status { get; set; } = string.Empty;
+            // Sales recorded before branching (no BranchId). Shown separately, never attributed to a branch.
+            public bool IsHistorical { get; set; }
+            public decimal Revenue { get; set; }
+            public int SalesCount { get; set; }
+            public decimal AverageSale { get; set; }
+            public int? PurchasingCustomers { get; set; }
+            public int? ReturningCustomers { get; set; }
+            public int? NewCustomers { get; set; }
+            public double? RetentionRatePercent { get; set; }
+            public decimal TodayRevenue { get; set; }
+            public int TodaySalesCount { get; set; }
+            public DateTime? LastSaleAt { get; set; }
+            public int? UnitsOnHand { get; set; }
+            public int? LowStockItems { get; set; }
+            public int? AssignedAccounts { get; set; }
+        }
+
+        // PREMIUM Branch BI. ADMIN: every active branch of this company, plus sales recorded before branching
+        // as a separate row. MANAGER: the assigned branch only; no assignment returns an empty "NotAssigned" result.
+        // Sales follow the dashboard rules (Completed and not deleted). A customer is "returning" at a branch when
+        // they had an earlier completed sale at that same branch.
+        [HttpGet("branches")]
+        [RequireTenantPermission(TenantPermissions.ViewBranchBI)]
+        public async Task<IActionResult> GetBranchDashboard(
+            int companyId,
+            [FromServices] ISubscriptionService subscriptions,
+            int? year = null,
+            int? month = null,
+            DateTime? startDate = null,
+            DateTime? endDate = null)
+        {
+            if (!TryGetReportRange(year, month, startDate, endDate, out var start, out var end, out var rangeError))
+            {
+                return BadRequest(rangeError);
+            }
+
+            await using var tenantDb = await _tenantFactory.CreateAsync(companyId);
+
+            bool isAdmin = BranchStock.IsAdmin(HttpContext);
+            string period = new MonthReport(tenantDb, start, end).Label;
+
+            List<BranchRow> branches;
+
+            if (isAdmin)
+            {
+                branches = await tenantDb.Branches
+                    .AsNoTracking()
+                    .Where(b => b.Status == "Active")
+                    .OrderBy(b => b.BranchName)
+                    .Select(b => new BranchRow(b.BranchId, b.BranchName, b.Status))
+                    .ToListAsync();
+            }
+            else
+            {
+                var assigned = await BranchStock.GetAssignedBranchAsync(tenantDb, User);
+
+                if (assigned == null)
+                {
+                    return Ok(new
+                    {
+                        Scope = "NotAssigned",
+                        Period = period,
+                        ActiveBranches = (int?)null,
+                        MaxBranches = (int?)null,
+                        Branches = new List<BranchBiRow>()
+                    });
+                }
+
+                branches = new List<BranchRow> { new(assigned.BranchId, assigned.BranchName, assigned.Status) };
+            }
+
+            var branchIds = branches.Select(b => b.BranchId).ToList();
+
+            DateTime today = DateTime.Now.Date;
+            DateTime tomorrow = today.AddDays(1);
+
+            var periodSales = await LoadBranchSalesAsync(tenantDb, branchIds, isAdmin, start, end);
+            var todaySales = await LoadBranchSalesAsync(tenantDb, branchIds, isAdmin, today, tomorrow);
+
+            var periodCustomerIds = periodSales
+                .Where(s => s.BranchId != null)
+                .Select(s => s.CustomerId)
+                .Distinct()
+                .ToList();
+
+            var earlierPurchases = periodCustomerIds.Count == 0
+                ? new HashSet<(int BranchId, int CustomerId)>()
+                : (await tenantDb.SalesTransactions
+                    .AsNoTracking()
+                    .Where(x => !x.IsDeleted &&
+                                x.Status == "Completed" &&
+                                x.TransactionDate < start &&
+                                x.BranchId != null &&
+                                branchIds.Contains(x.BranchId.Value) &&
+                                periodCustomerIds.Contains(x.CustomerId))
+                    .Select(x => new { BranchId = x.BranchId!.Value, x.CustomerId })
+                    .Distinct()
+                    .ToListAsync())
+                    .Select(x => (x.BranchId, x.CustomerId))
+                    .ToHashSet();
+
+            var lastSales = await tenantDb.SalesTransactions
+                .AsNoTracking()
+                .Where(x => !x.IsDeleted &&
+                            x.Status == "Completed" &&
+                            x.BranchId != null &&
+                            branchIds.Contains(x.BranchId.Value))
+                .GroupBy(x => x.BranchId!.Value)
+                .Select(g => new { BranchId = g.Key, Last = g.Max(x => x.TransactionDate) })
+                .ToDictionaryAsync(x => x.BranchId, x => x.Last);
+
+            var activeProducts = await tenantDb.Products
+                .AsNoTracking()
+                .Where(p => p.Status == "Active")
+                .Select(p => new { p.ProductId, p.ReorderLevel })
+                .ToListAsync();
+
+            var inventory = await tenantDb.BranchInventories
+                .AsNoTracking()
+                .Where(i => branchIds.Contains(i.BranchId))
+                .Select(i => new { i.BranchId, i.ProductId, i.Quantity })
+                .ToListAsync();
+
+            var assignedAccounts = await tenantDb.BranchAssignments
+                .AsNoTracking()
+                .Where(a => a.BranchId != null && branchIds.Contains(a.BranchId.Value))
+                .GroupBy(a => a.BranchId!.Value)
+                .Select(g => new { BranchId = g.Key, Count = g.Count() })
+                .ToDictionaryAsync(x => x.BranchId, x => x.Count);
+
+            var rows = new List<BranchBiRow>();
+
+            foreach (var branch in branches)
+            {
+                var sales = periodSales.Where(s => s.BranchId == branch.BranchId).ToList();
+                var todays = todaySales.Where(s => s.BranchId == branch.BranchId).ToList();
+                var customers = sales.Select(s => s.CustomerId).Distinct().ToList();
+                int returning = customers.Count(c => earlierPurchases.Contains((branch.BranchId, c)));
+
+                var stock = inventory
+                    .Where(i => i.BranchId == branch.BranchId)
+                    .ToDictionary(i => i.ProductId, i => i.Quantity);
+
+                rows.Add(new BranchBiRow
+                {
+                    BranchId = branch.BranchId,
+                    BranchName = branch.BranchName,
+                    Status = branch.Status,
+                    Revenue = sales.Sum(s => s.FinalAmount),
+                    SalesCount = sales.Count,
+                    AverageSale = sales.Count > 0 ? Math.Round(sales.Sum(s => s.FinalAmount) / sales.Count, 2) : 0m,
+                    PurchasingCustomers = customers.Count,
+                    ReturningCustomers = returning,
+                    NewCustomers = customers.Count - returning,
+                    RetentionRatePercent = customers.Count > 0 ? Math.Round(returning * 100.0 / customers.Count, 1) : null,
+                    TodayRevenue = todays.Sum(s => s.FinalAmount),
+                    TodaySalesCount = todays.Count,
+                    LastSaleAt = lastSales.TryGetValue(branch.BranchId, out var last) ? last : null,
+                    UnitsOnHand = activeProducts.Sum(p => stock.TryGetValue(p.ProductId, out var q) ? q : 0),
+                    LowStockItems = activeProducts.Count(p => (stock.TryGetValue(p.ProductId, out var q) ? q : 0) <= p.ReorderLevel),
+                    AssignedAccounts = assignedAccounts.TryGetValue(branch.BranchId, out var count) ? count : 0
+                });
+            }
+
+            if (isAdmin)
+            {
+                var historical = periodSales.Where(s => s.BranchId == null).ToList();
+                var historicalToday = todaySales.Where(s => s.BranchId == null).ToList();
+
+                if (historical.Count > 0 || historicalToday.Count > 0)
+                {
+                    rows.Add(new BranchBiRow
+                    {
+                        BranchId = null,
+                        BranchName = "No branch (before branching)",
+                        Status = string.Empty,
+                        IsHistorical = true,
+                        Revenue = historical.Sum(s => s.FinalAmount),
+                        SalesCount = historical.Count,
+                        AverageSale = historical.Count > 0 ? Math.Round(historical.Sum(s => s.FinalAmount) / historical.Count, 2) : 0m,
+                        TodayRevenue = historicalToday.Sum(s => s.FinalAmount),
+                        TodaySalesCount = historicalToday.Count
+                    });
+                }
+            }
+
+            var subscription = isAdmin ? await subscriptions.GetCurrentAsync(companyId) : null;
+
+            return Ok(new
+            {
+                Scope = isAdmin ? "Company" : "Branch",
+                Period = period,
+                ActiveBranches = isAdmin ? branches.Count : (int?)null,
+                MaxBranches = subscription?.MaxBranches,
+                Branches = rows
+            });
+        }
+
+        // Completed, non-deleted sales of the given branches; ADMIN also gets the sales recorded before branching.
+        private static async Task<List<BranchSaleRow>> LoadBranchSalesAsync(
+            TenantCrmDbContext tenantDb,
+            List<int> branchIds,
+            bool includeHistorical,
+            DateTime start,
+            DateTime end)
+        {
+            return await tenantDb.SalesTransactions
+                .AsNoTracking()
+                .Where(x => !x.IsDeleted &&
+                            x.Status == "Completed" &&
+                            x.TransactionDate >= start &&
+                            x.TransactionDate < end &&
+                            ((x.BranchId == null && includeHistorical) ||
+                             (x.BranchId != null && branchIds.Contains(x.BranchId.Value))))
+                .Select(x => new BranchSaleRow(x.BranchId, x.CustomerId, x.FinalAmount, x.TransactionDate))
+                .ToListAsync();
         }
 
         #region Generated report types and builders
@@ -1183,7 +1978,8 @@ namespace freshcrumbs.CRM.api.Controllers
             "promotions",
             "discounts",
             "feedback",
-            "inquiries"
+            "inquiries",
+            "business-summary"
         };
 
         private sealed class GeneratedReportColumn
@@ -1420,11 +2216,12 @@ namespace freshcrumbs.CRM.api.Controllers
         private static GeneratedReport BuildCustomerReport(
             List<CustomerReportRow> customers,
             List<CustomerSpendRow> spend,
+            Dictionary<int, DateTime> lastPurchases,
             string period)
         {
             var report = NewReport("customers", "Customer Report", period,
                 Col("Code"), Col("Name"), Col("Email"), Col("Contact No"), Col("Status"), Col("Date Registered"),
-                Col("Purchases (Period)", true), Col("Amount Spent (₱)", true), Col("Current Points", true));
+                Col("Purchases (Period)", true), Col("Amount Spent (₱)", true), Col("Last Purchase"), Col("Current Points", true));
 
             var spendByCustomer = spend.ToDictionary(s => s.CustomerId);
             int totalPurchases = 0;
@@ -1448,6 +2245,7 @@ namespace freshcrumbs.CRM.api.Controllers
                     ReportDate(c.CreatedAt),
                     ReportCount(purchases),
                     ReportAmount(spent),
+                    lastPurchases.TryGetValue(c.CustomerId, out var lastPurchase) ? ReportDate(lastPurchase) : string.Empty,
                     ReportCount(c.LoyaltyPoints)
                 });
             }
@@ -1719,6 +2517,7 @@ namespace freshcrumbs.CRM.api.Controllers
         #region Generated report endpoint
 
         [HttpGet("generate")]
+        [RequireTenantPermission(TenantPermissions.GenerateReports)]
         public async Task<IActionResult> GenerateReport(int companyId, string? reportType = null, DateTime? startDate = null, DateTime? endDate = null)
         {
             string key = (reportType ?? string.Empty).Trim().ToLowerInvariant();
@@ -1726,6 +2525,15 @@ namespace freshcrumbs.CRM.api.Controllers
             if (!GeneratedReportTypes.Contains(key))
             {
                 return BadRequest(UnknownReportTypeMessage);
+            }
+
+            if (!HttpContext.HasTenantPermission(TenantPermissions.ReportPermission(key)))
+            {
+                return StatusCode(StatusCodes.Status403Forbidden, new
+                {
+                    code = "ReportNotAllowed",
+                    message = "Your subscription plan or role does not allow this report."
+                });
             }
 
             // Inventory is a current-stock snapshot, so it is the only report without a date range.
@@ -1755,58 +2563,124 @@ namespace freshcrumbs.CRM.api.Controllers
 
             await using var tenantDb = await _tenantFactory.CreateAsync(companyId);
 
+            // PREMIUM (Branching): ADMIN reports stay company-wide. A MANAGER's sales, stock, discount, promotion-usage,
+            // customer-spend and loyalty figures cover only the assigned branch; without an active assigned branch
+            // every report is returned empty instead of company-wide.
+            int? branchScope = null;
+            bool noData = false;
+
+            if (BranchStock.IsBranchingCompany(HttpContext) && !BranchStock.IsAdmin(HttpContext))
+            {
+                var assigned = await BranchStock.GetAssignedBranchAsync(tenantDb, User);
+
+                if (assigned == null)
+                {
+                    noData = true;
+                    period += " | Not assigned to a branch - ask your administrator";
+                }
+                else
+                {
+                    branchScope = assigned.BranchId;
+                    period += " | Branch: " + assigned.BranchName;
+                }
+            }
+
             GeneratedReport report;
 
             switch (key)
             {
                 case "sales":
-                    report = BuildSalesReport(await GetSalesReportRowsAsync(tenantDb, start, end, false), period);
+                    report = BuildSalesReport(
+                        noData ? new() : await GetSalesReportRowsAsync(tenantDb, start, end, false, branchScope), period);
                     break;
 
                 case "customers":
                     report = BuildCustomerReport(
-                        await GetCustomerReportRowsAsync(tenantDb),
-                        await GetCustomerSpendRowsAsync(tenantDb, start, end),
+                        noData ? new() : await GetCustomerReportRowsAsync(tenantDb, branchScope),
+                        noData ? new() : await GetCustomerSpendRowsAsync(tenantDb, start, end, branchScope),
+                        noData ? new() : await GetLastPurchasesAsync(tenantDb, end, branchScope),
                         period);
                     break;
 
                 case "inventory":
-                    report = BuildInventoryReport(await GetInventoryReportRowsAsync(tenantDb), period);
+                    report = BuildInventoryReport(
+                        noData ? new() : await GetInventoryReportRowsAsync(tenantDb, branchScope), period);
                     break;
 
                 case "product-sales":
-                    report = BuildProductSalesReport(await GetProductSaleItemRowsAsync(tenantDb, start, end), period);
+                    report = BuildProductSalesReport(
+                        noData ? new() : await GetProductSaleItemRowsAsync(tenantDb, start, end, branchScope), period);
                     break;
 
                 case "loyalty":
-                    report = BuildLoyaltyReport(await GetLoyaltyReportRowsAsync(tenantDb, start, end), period);
+                    report = BuildLoyaltyReport(
+                        noData ? new() : await GetLoyaltyReportRowsAsync(tenantDb, start, end, branchScope), period);
                     break;
 
                 case "promotions":
                     report = BuildPromotionReport(
-                        await GetPromotionReportRowsAsync(tenantDb),
-                        await GetPromotionUsageRowsAsync(tenantDb, start, end),
+                        noData ? new() : await GetPromotionReportRowsAsync(tenantDb, branchScope),
+                        noData ? new() : await GetPromotionUsageRowsAsync(tenantDb, start, end, branchScope),
                         period);
                     break;
 
                 case "discounts":
-                    report = BuildDiscountReport(await GetSalesReportRowsAsync(tenantDb, start, end, true), period);
+                    report = BuildDiscountReport(
+                        noData ? new() : await GetSalesReportRowsAsync(tenantDb, start, end, true, branchScope), period);
                     break;
 
                 case "feedback":
-                    report = BuildFeedbackReport(await GetFeedbackReportRowsAsync(tenantDb, start, end), period);
+                    report = BuildFeedbackReport(
+                        noData ? new() : await GetFeedbackReportRowsAsync(tenantDb, start, end, branchScope), period);
+                    break;
+
+                case "business-summary":
+                    report = noData
+                        ? NewReport("business-summary", "Business Summary Report", period, Col("Section"), Col("Metric"), Col("Value"))
+                        : await BuildBusinessSummaryReportAsync(tenantDb, start, end, branchScope, period);
                     break;
 
                 default:
-                    report = BuildInquiryReport(await GetInquiryReportRowsAsync(tenantDb, start, end), period);
+                    report = BuildInquiryReport(
+                        noData ? new() : await GetInquiryReportRowsAsync(tenantDb, start, end, branchScope), period);
                     break;
+            }
+
+            if (!HttpContext.HasTenantPermission(TenantPermissions.UsePromotions))
+            {
+                RemoveColumns(report, "Promotion", "Promotion Discount (₱)", "Points Earned", "Points Used", "Current Points");
             }
 
             return Ok(report);
         }
 
+        private static void RemoveColumns(GeneratedReport report, params string[] headers)
+        {
+            foreach (var header in headers)
+            {
+                int index = report.Columns.FindIndex(c => c.Header == header);
+
+                if (index < 0)
+                {
+                    continue;
+                }
+
+                report.Columns.RemoveAt(index);
+
+                foreach (var row in report.Rows)
+                {
+                    row.RemoveAt(index);
+                }
+
+                if (report.Totals.Count > index)
+                {
+                    report.Totals.RemoveAt(index);
+                }
+            }
+        }
+
         private static async Task<List<SalesReportRow>> GetSalesReportRowsAsync(
-            TenantCrmDbContext db, DateTime start, DateTime end, bool discountedOnly)
+            TenantCrmDbContext db, DateTime start, DateTime end, bool discountedOnly, int? branchId = null)
         {
             // Same rule as the BI figures: completed, non-deleted sales only.
             var query = db.SalesTransactions
@@ -1819,6 +2693,11 @@ namespace freshcrumbs.CRM.api.Controllers
             if (discountedOnly)
             {
                 query = query.Where(x => x.DiscountAmount > 0 || x.CustomerDiscountAmount > 0);
+            }
+
+            if (branchId != null)
+            {
+                query = query.Where(x => x.BranchId == branchId);
             }
 
             return await query
@@ -1840,10 +2719,17 @@ namespace freshcrumbs.CRM.api.Controllers
                 .ToListAsync();
         }
 
-        private static async Task<List<CustomerReportRow>> GetCustomerReportRowsAsync(TenantCrmDbContext db)
+        // Branch scope: customers associated with that branch (registered or bought there).
+        private static async Task<List<CustomerReportRow>> GetCustomerReportRowsAsync(TenantCrmDbContext db, int? branchId = null)
         {
-            return await db.Customers
-                .AsNoTracking()
+            var customers = db.Customers.AsNoTracking();
+
+            if (branchId != null)
+            {
+                customers = BranchStock.AssociatedWith(customers, db, branchId.Value);
+            }
+
+            return await customers
                 .Select(c => new CustomerReportRow(
                     c.CustomerId,
                     c.CustomerCode,
@@ -1857,15 +2743,31 @@ namespace freshcrumbs.CRM.api.Controllers
                 .ToListAsync();
         }
 
+        // Latest completed purchase before the end of the report period (branch scope: at that branch only),
+        // so a Manager can see who has not bought from their branch recently.
+        private static async Task<Dictionary<int, DateTime>> GetLastPurchasesAsync(TenantCrmDbContext db, DateTime end, int? branchId = null)
+        {
+            return await db.SalesTransactions
+                .AsNoTracking()
+                .Where(x => !x.IsDeleted &&
+                            x.Status == "Completed" &&
+                            x.TransactionDate < end &&
+                            (branchId == null || x.BranchId == branchId))
+                .GroupBy(x => x.CustomerId)
+                .Select(g => new { CustomerId = g.Key, Last = g.Max(x => x.TransactionDate) })
+                .ToDictionaryAsync(x => x.CustomerId, x => x.Last);
+        }
+
         private static async Task<List<CustomerSpendRow>> GetCustomerSpendRowsAsync(
-            TenantCrmDbContext db, DateTime start, DateTime end)
+            TenantCrmDbContext db, DateTime start, DateTime end, int? branchId = null)
         {
             var totals = await db.SalesTransactions
                 .AsNoTracking()
                 .Where(x => !x.IsDeleted &&
                             x.Status == "Completed" &&
                             x.TransactionDate >= start &&
-                            x.TransactionDate < end)
+                            x.TransactionDate < end &&
+                            (branchId == null || x.BranchId == branchId))
                 .GroupBy(x => x.CustomerId)
                 .Select(g => new { CustomerId = g.Key, Purchases = g.Count(), Amount = g.Sum(x => x.FinalAmount) })
                 .ToListAsync();
@@ -1875,8 +2777,35 @@ namespace freshcrumbs.CRM.api.Controllers
                 .ToList();
         }
 
-        private static async Task<List<InventoryReportRow>> GetInventoryReportRowsAsync(TenantCrmDbContext db)
+        // Branch scope: the stock held at that branch (BranchInventory); a product the branch never stocked shows 0.
+        private static async Task<List<InventoryReportRow>> GetInventoryReportRowsAsync(TenantCrmDbContext db, int? branchId = null)
         {
+            if (branchId != null)
+            {
+                int scope = branchId.Value;
+
+                var branchStock = await db.BranchInventories
+                    .AsNoTracking()
+                    .Where(i => i.BranchId == scope)
+                    .ToDictionaryAsync(i => i.ProductId, i => i.Quantity);
+
+                var products = await db.Products
+                    .AsNoTracking()
+                    .Select(p => new { p.ProductId, p.ProductCode, p.ProductName, p.Category, p.Price, p.ReorderLevel, p.Status })
+                    .ToListAsync();
+
+                return products
+                    .Select(p => new InventoryReportRow(
+                        p.ProductCode,
+                        p.ProductName,
+                        p.Category,
+                        p.Price,
+                        branchStock.TryGetValue(p.ProductId, out var quantity) ? quantity : 0,
+                        p.ReorderLevel,
+                        p.Status))
+                    .ToList();
+            }
+
             return await db.Products
                 .AsNoTracking()
                 .Select(p => new InventoryReportRow(
@@ -1891,7 +2820,7 @@ namespace freshcrumbs.CRM.api.Controllers
         }
 
         private static async Task<List<ProductSaleItemRow>> GetProductSaleItemRowsAsync(
-            TenantCrmDbContext db, DateTime start, DateTime end)
+            TenantCrmDbContext db, DateTime start, DateTime end, int? branchId = null)
         {
             return await db.TransactionItems
                 .AsNoTracking()
@@ -1899,7 +2828,8 @@ namespace freshcrumbs.CRM.api.Controllers
                              !ti.SalesTransaction.IsDeleted &&
                              ti.SalesTransaction.Status == "Completed" &&
                              ti.SalesTransaction.TransactionDate >= start &&
-                             ti.SalesTransaction.TransactionDate < end)
+                             ti.SalesTransaction.TransactionDate < end &&
+                             (branchId == null || ti.SalesTransaction.BranchId == branchId))
                 .Select(ti => new ProductSaleItemRow(
                     ti.ProductId,
                     ti.TransactionId,
@@ -1911,8 +2841,9 @@ namespace freshcrumbs.CRM.api.Controllers
                 .ToListAsync();
         }
 
+        // Branch scope: only points earned/used on that branch's sales (manual adjustments have no branch).
         private static async Task<List<LoyaltyReportRow>> GetLoyaltyReportRowsAsync(
-            TenantCrmDbContext db, DateTime start, DateTime end)
+            TenantCrmDbContext db, DateTime start, DateTime end, int? branchId = null)
         {
             // Same rule as MonthReport.GetPointsAsync, so report totals match the dashboard points KPIs.
             return await db.LoyaltyTransactions
@@ -1924,7 +2855,9 @@ namespace freshcrumbs.CRM.api.Controllers
                             (x.SalesTransactionId == null ||
                              (x.SalesTransaction != null &&
                               !x.SalesTransaction.IsDeleted &&
-                              x.SalesTransaction.Status == "Completed")))
+                              x.SalesTransaction.Status == "Completed")) &&
+                            (branchId == null ||
+                             (x.SalesTransaction != null && x.SalesTransaction.BranchId == branchId)))
                 .OrderBy(x => x.Date)
                 .ThenBy(x => x.LoyaltyTransactionId)
                 .Select(x => new LoyaltyReportRow(
@@ -1938,10 +2871,12 @@ namespace freshcrumbs.CRM.api.Controllers
                 .ToListAsync();
         }
 
-        private static async Task<List<PromotionReportRow>> GetPromotionReportRowsAsync(TenantCrmDbContext db)
+        // Branch scope: company-wide promotions plus that branch's own promotions.
+        private static async Task<List<PromotionReportRow>> GetPromotionReportRowsAsync(TenantCrmDbContext db, int? branchId = null)
         {
             return await db.Promotions
                 .AsNoTracking()
+                .Where(p => branchId == null || p.BranchId == null || p.BranchId == branchId)
                 .Select(p => new PromotionReportRow(
                     p.PromotionId,
                     p.PromotionName,
@@ -1956,7 +2891,7 @@ namespace freshcrumbs.CRM.api.Controllers
         }
 
         private static async Task<List<PromotionUsageRow>> GetPromotionUsageRowsAsync(
-            TenantCrmDbContext db, DateTime start, DateTime end)
+            TenantCrmDbContext db, DateTime start, DateTime end, int? branchId = null)
         {
             var usage = await db.SalesTransactions
                 .AsNoTracking()
@@ -1964,7 +2899,8 @@ namespace freshcrumbs.CRM.api.Controllers
                             x.Status == "Completed" &&
                             x.PromotionId != null &&
                             x.TransactionDate >= start &&
-                            x.TransactionDate < end)
+                            x.TransactionDate < end &&
+                            (branchId == null || x.BranchId == branchId))
                 .GroupBy(x => x.PromotionId)
                 .Select(g => new
                 {
@@ -1982,11 +2918,12 @@ namespace freshcrumbs.CRM.api.Controllers
         }
 
         private static async Task<List<FeedbackReportRow>> GetFeedbackReportRowsAsync(
-            TenantCrmDbContext db, DateTime start, DateTime end)
+            TenantCrmDbContext db, DateTime start, DateTime end, int? branchId = null)
         {
             return await db.Feedbacks
                 .AsNoTracking()
-                .Where(x => !x.IsDeleted && x.DateSubmitted >= start && x.DateSubmitted < end)
+                .Where(x => !x.IsDeleted && x.DateSubmitted >= start && x.DateSubmitted < end &&
+                            (branchId == null || x.BranchId == branchId))
                 .OrderBy(x => x.DateSubmitted)
                 .ThenBy(x => x.FeedbackId)
                 .Select(x => new FeedbackReportRow(
@@ -2001,11 +2938,12 @@ namespace freshcrumbs.CRM.api.Controllers
         }
 
         private static async Task<List<InquiryReportRow>> GetInquiryReportRowsAsync(
-            TenantCrmDbContext db, DateTime start, DateTime end)
+            TenantCrmDbContext db, DateTime start, DateTime end, int? branchId = null)
         {
             return await db.Inquiries
                 .AsNoTracking()
-                .Where(x => !x.IsDeleted && x.DateSubmitted >= start && x.DateSubmitted < end)
+                .Where(x => !x.IsDeleted && x.DateSubmitted >= start && x.DateSubmitted < end &&
+                            (branchId == null || x.BranchId == branchId))
                 .OrderBy(x => x.DateSubmitted)
                 .ThenBy(x => x.InquiryId)
                 .Select(x => new InquiryReportRow(

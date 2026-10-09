@@ -8,6 +8,8 @@
 
         public int? PromotionId { get; set; }
 
+        public int? BranchId { get; set; }
+
         public DateTime TransactionDate { get; set; } = DateTime.Now;
 
         public decimal TotalAmount { get; set; }

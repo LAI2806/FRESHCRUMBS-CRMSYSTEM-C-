@@ -18,6 +18,8 @@
 
         public int Sold { get; set; }
 
+        public int? BranchQuantity { get; set; }
+
         public int ReorderLevel { get; set; } = 10;
 
         public string StockLevel { get; set; } = string.Empty;

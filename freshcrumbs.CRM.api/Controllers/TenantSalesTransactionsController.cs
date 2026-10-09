@@ -1,5 +1,7 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using freshcrumbs.CRM.api.Authorization;
+using freshcrumbs.CRM.api.Services;
 using freshcrumbs.CRM.domain.entities;
 using freshcrumbs.CRM.infrastructure.services;
 
@@ -20,6 +22,15 @@ namespace freshcrumbs.CRM.api.Controllers
             _tenantFactory = tenantFactory;
         }
 
+        private ObjectResult FeatureNotIncluded(string feature)
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new
+            {
+                code = "FeatureNotIncluded",
+                message = $"Your current plan does not include {feature}."
+            });
+        }
+
         [HttpGet]
         public async Task<IActionResult> GetSalesTransactions(int companyId, bool includeDeleted = false)
         {
@@ -30,6 +41,14 @@ namespace freshcrumbs.CRM.api.Controllers
             if (!includeDeleted)
             {
                 query = query.Where(x => !x.IsDeleted);
+            }
+
+            // PREMIUM MANAGER / STAFF: their assigned branch only (from the account, never from the request).
+            var scope = await BranchStock.GetScopeAsync(HttpContext, tenantDb);
+
+            if (scope.Restricted)
+            {
+                query = query.Where(x => x.BranchId != null && x.BranchId == scope.BranchId);
             }
 
             var transactions = await query
@@ -52,6 +71,7 @@ namespace freshcrumbs.CRM.api.Controllers
                     x.TransactionId,
                     x.CustomerId,
                     x.PromotionId,
+                    x.BranchId,
                     x.TransactionDate,
                     x.TotalAmount,
                     x.DiscountAmount,
@@ -77,12 +97,27 @@ namespace freshcrumbs.CRM.api.Controllers
                 return NotFound($"SalesTransaction with id {id} not found.");
             }
 
+            if (!(await BranchStock.GetScopeAsync(HttpContext, tenantDb)).Allows(transaction.BranchId))
+            {
+                return OtherBranch();
+            }
+
             return Ok(transaction);
         }
 
         [HttpPost]
         public async Task<IActionResult> CreateSalesTransaction(int companyId, SalesTransaction transaction)
         {
+            string? fieldError = ValidateSaleFields(transaction, null);
+            if (fieldError != null)
+            {
+                return BadRequest(InputRules.Message(fieldError));
+            }
+
+            // Linked records are looked up by id only; objects nested in the request are never saved.
+            transaction.Customer = null;
+            transaction.Promotion = null;
+
             await using var tenantDb = await _tenantFactory.CreateAsync(companyId);
 
             var customer = await tenantDb.Customers
@@ -98,6 +133,82 @@ namespace freshcrumbs.CRM.api.Controllers
                 return BadRequest($"Customer \"{customer.FirstName} {customer.LastName}\" is inactive and cannot make new purchases.");
             }
 
+            var branchError = await AssignSaleBranchAsync(tenantDb, transaction);
+            if (branchError != null)
+            {
+                return branchError;
+            }
+
+            // Recording a sale is ONE request: the sale and all its items are saved together (nothing half-saved).
+            // Prices come from the products on the server; the client's prices and totals are ignored.
+            // An empty sale (items added later through Manage Items) is a management action only.
+            var requestedItems = transaction.TransactionItems.ToList();
+            transaction.TransactionId = 0;
+            transaction.RowGuid = Guid.NewGuid();
+            transaction.IsDeleted = false;
+            transaction.TransactionItems = new List<TransactionItem>();
+
+            if (requestedItems.Count == 0 && !HttpContext.HasTenantPermission(TenantPermissions.ManageSales))
+            {
+                return BadRequest(new { message = "Add at least one product to record the sale." });
+            }
+
+            // A sale with no items has no total yet; the client's TotalAmount is never used.
+            transaction.TotalAmount = 0m;
+
+            if (requestedItems.Count > 0)
+            {
+                decimal total = 0m;
+
+                foreach (var requested in requestedItems)
+                {
+                    if (requested.Quantity <= 0 || requested.Quantity > InputRules.MaxQuantity)
+                    {
+                        return BadRequest(new { message = $"Quantity must be greater than zero and at most {InputRules.MaxQuantity:N0}." });
+                    }
+
+                    var product = await tenantDb.Products.FirstOrDefaultAsync(x => x.ProductId == requested.ProductId);
+
+                    if (product == null || !string.Equals(product.Status, "Active", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return BadRequest(new { message = $"Product {requested.ProductId} does not exist or is inactive." });
+                    }
+
+                    // Same stock rules as Manage Items (branch stock on Branching plans, Product.Quantity otherwise).
+                    var stockError = await BranchStock.TakeAsync(tenantDb, product, transaction.BranchId, requested.Quantity);
+                    if (stockError != null)
+                    {
+                        return Conflict(new { code = "StockConflict", message = stockError });
+                    }
+
+                    var item = new TransactionItem
+                    {
+                        ProductId = product.ProductId,
+                        Quantity = requested.Quantity,
+                        UnitPrice = product.Price,
+                        Subtotal = requested.Quantity * product.Price
+                    };
+
+                    transaction.TransactionItems.Add(item);
+                    total += item.Subtotal;
+                }
+
+                transaction.TotalAmount = total;
+            }
+
+            bool usePromotions = HttpContext.HasTenantPermission(TenantPermissions.UsePromotions);
+            bool useLoyalty = HttpContext.HasTenantPermission(TenantPermissions.UseLoyalty);
+
+            if (!usePromotions && transaction.PromotionId.HasValue)
+            {
+                return FeatureNotIncluded("Promotions");
+            }
+
+            if (!useLoyalty && (transaction.PointsUsed != 0 || transaction.PointsEarned != 0))
+            {
+                return FeatureNotIncluded("Loyalty Points");
+            }
+
             Promotion? appliedPromotion = null;
 
             if (transaction.PromotionId.HasValue)
@@ -110,7 +221,7 @@ namespace freshcrumbs.CRM.api.Controllers
                     return BadRequest($"PromotionId {transaction.PromotionId} does not exist for this tenant.");
                 }
 
-                string? promotionError = ValidatePromotion(promotion, transaction.TransactionDate, transaction.TotalAmount);
+                string? promotionError = ValidatePromotion(promotion, transaction.TransactionDate, transaction.TotalAmount, transaction.BranchId);
                 if (promotionError != null)
                 {
                     return BadRequest(promotionError);
@@ -156,39 +267,48 @@ namespace freshcrumbs.CRM.api.Controllers
             transaction.FinalAmount = transaction.TotalAmount - transaction.DiscountAmount - transaction.CustomerDiscountAmount;
 
             // Never trust a client-supplied value.
-            transaction.PointsEarned = CalculatePointsEarned(transaction.FinalAmount);
+            transaction.PointsEarned = useLoyalty ? CalculatePointsEarned(transaction.FinalAmount) : 0;
 
             transaction.Status = "Completed";
 
             tenantDb.SalesTransactions.Add(transaction);
-            await tenantDb.SaveChangesAsync();
 
             if (transaction.PointsEarned != 0 || transaction.PointsUsed != 0)
             {
                 customer.LoyaltyPoints += transaction.PointsEarned - transaction.PointsUsed;
 
-                var loyaltyTransaction = new LoyaltyTransaction
+                tenantDb.LoyaltyTransactions.Add(new LoyaltyTransaction
                 {
                     CustomerId = transaction.CustomerId,
-                    SalesTransactionId = transaction.TransactionId,
+                    SalesTransaction = transaction,
                     PointsEarned = transaction.PointsEarned,
                     PointsUsed = transaction.PointsUsed,
                     TransactionType = "Sale",
                     Date = transaction.TransactionDate
-                };
-
-                tenantDb.LoyaltyTransactions.Add(loyaltyTransaction);
-                await tenantDb.SaveChangesAsync();
+                });
             }
+
+            // Sale, items, stock and loyalty points in one save.
+            await tenantDb.SaveChangesAsync();
 
             return Created(
                 $"api/tenant/{companyId}/sales/{transaction.TransactionId}",
-                transaction);
+                ToFlatResponse(transaction));
         }
 
         [HttpPut("{id:int}")]
+        [RequireTenantPermission(TenantPermissions.ManageSales)]
         public async Task<IActionResult> UpdateSalesTransaction(int companyId, int id, SalesTransaction updated)
         {
+            // A sale is Completed or Cancelled; cancelling is the only status change (restores stock and points).
+            string? requestedStatus = InputRules.OneOf(updated.Status, "Completed", "Cancelled");
+            if (requestedStatus == null)
+            {
+                return BadRequest(InputRules.Message("Status must be Completed or Cancelled."));
+            }
+
+            updated.Status = requestedStatus;
+
             await using var tenantDb = await _tenantFactory.CreateAsync(companyId);
 
             var transaction = await tenantDb.SalesTransactions
@@ -199,6 +319,11 @@ namespace freshcrumbs.CRM.api.Controllers
                 return NotFound($"SalesTransaction with id {id} not found.");
             }
 
+            if (!await BranchStock.CanChangeSaleAsync(HttpContext, tenantDb, transaction.BranchId))
+            {
+                return OtherBranch();
+            }
+
             var customer = await tenantDb.Customers
                 .FirstOrDefaultAsync(x => x.CustomerId == transaction.CustomerId);
 
@@ -206,6 +331,9 @@ namespace freshcrumbs.CRM.api.Controllers
             {
                 return BadRequest("Linked customer no longer exists.");
             }
+
+            bool usePromotions = HttpContext.HasTenantPermission(TenantPermissions.UsePromotions);
+            bool useLoyalty = HttpContext.HasTenantPermission(TenantPermissions.UseLoyalty);
 
             bool isAlreadyCancelled = string.Equals(transaction.Status, "Cancelled", StringComparison.OrdinalIgnoreCase);
             bool isBeingCancelledNow =
@@ -229,24 +357,27 @@ namespace freshcrumbs.CRM.api.Controllers
 
                     if (product != null)
                     {
-                        product.Quantity += item.Quantity;
+                        await BranchStock.ReturnAsync(tenantDb, product, transaction.BranchId, item.Quantity);
                     }
                 }
 
-                int originalDelta = transaction.PointsEarned - transaction.PointsUsed;
-                customer.LoyaltyPoints -= originalDelta;
-
-                if (transaction.PointsEarned != 0 || transaction.PointsUsed != 0)
+                if (useLoyalty)
                 {
-                    tenantDb.LoyaltyTransactions.Add(new LoyaltyTransaction
+                    int originalDelta = transaction.PointsEarned - transaction.PointsUsed;
+                    customer.LoyaltyPoints -= originalDelta;
+
+                    if (transaction.PointsEarned != 0 || transaction.PointsUsed != 0)
                     {
-                        CustomerId = transaction.CustomerId,
-                        SalesTransactionId = transaction.TransactionId,
-                        PointsEarned = transaction.PointsUsed,
-                        PointsUsed = transaction.PointsEarned,
-                        TransactionType = "Cancellation",
-                        Date = DateTime.UtcNow
-                    });
+                        tenantDb.LoyaltyTransactions.Add(new LoyaltyTransaction
+                        {
+                            CustomerId = transaction.CustomerId,
+                            SalesTransactionId = transaction.TransactionId,
+                            PointsEarned = transaction.PointsUsed,
+                            PointsUsed = transaction.PointsEarned,
+                            TransactionType = "Cancellation",
+                            Date = DateTime.UtcNow
+                        });
+                    }
                 }
 
                 transaction.Status = "Cancelled";
@@ -261,10 +392,38 @@ namespace freshcrumbs.CRM.api.Controllers
                 return Conflict("This transaction is already cancelled and cannot be modified further.");
             }
 
+            string? fieldError = ValidateSaleFields(updated, transaction);
+            if (fieldError != null)
+            {
+                return BadRequest(InputRules.Message(fieldError));
+            }
+
+            // The sale total is never taken from the client: editing a sale keeps the stored total
+            // (it comes from the server-priced items). Discounts and points below are recalculated from it.
+            updated.TotalAmount = transaction.TotalAmount;
+
+            if (!usePromotions && updated.PromotionId != transaction.PromotionId)
+            {
+                return FeatureNotIncluded("Promotions");
+            }
+
+            if (!useLoyalty && (updated.PointsUsed != transaction.PointsUsed || updated.PointsEarned != transaction.PointsEarned))
+            {
+                return FeatureNotIncluded("Loyalty Points");
+            }
+
             decimal discountAmount = 0;
             Promotion? appliedPromotion = null;
 
-            if (updated.PromotionId.HasValue)
+            if (updated.PromotionId.HasValue && !usePromotions)
+            {
+                appliedPromotion = await tenantDb.Promotions
+                    .FirstOrDefaultAsync(x => x.PromotionId == updated.PromotionId.Value);
+
+                discountAmount = Math.Min(transaction.DiscountAmount, updated.TotalAmount);
+                updated.PointsUsed = transaction.PointsUsed;
+            }
+            else if (updated.PromotionId.HasValue)
             {
                 var promotion = await tenantDb.Promotions
                     .FirstOrDefaultAsync(x => x.PromotionId == updated.PromotionId.Value);
@@ -274,7 +433,7 @@ namespace freshcrumbs.CRM.api.Controllers
                     return BadRequest($"PromotionId {updated.PromotionId} does not exist for this tenant.");
                 }
 
-                string? promotionError = ValidatePromotion(promotion, updated.TransactionDate, updated.TotalAmount);
+                string? promotionError = ValidatePromotion(promotion, updated.TransactionDate, updated.TotalAmount, transaction.BranchId);
                 if (promotionError != null)
                 {
                     return BadRequest(promotionError);
@@ -323,33 +482,41 @@ namespace freshcrumbs.CRM.api.Controllers
 
             decimal finalAmount = updated.TotalAmount - discountAmount - customerDiscountAmount;
 
-            // Never trust a client-supplied value.
-            updated.PointsEarned = CalculatePointsEarned(finalAmount);
-
-            int oldDelta = transaction.PointsEarned - transaction.PointsUsed;
-            int newDelta = updated.PointsEarned - updated.PointsUsed;
-            customer.LoyaltyPoints += (newDelta - oldDelta);
-
-            var linkedLoyalty = await tenantDb.LoyaltyTransactions
-                .FirstOrDefaultAsync(x => x.SalesTransactionId == id && x.TransactionType == "Sale");
-
-            if (linkedLoyalty != null)
+            if (useLoyalty)
             {
-                linkedLoyalty.PointsEarned = updated.PointsEarned;
-                linkedLoyalty.PointsUsed = updated.PointsUsed;
-                linkedLoyalty.Date = updated.TransactionDate;
-            }
-            else if (updated.PointsEarned != 0 || updated.PointsUsed != 0)
-            {
-                tenantDb.LoyaltyTransactions.Add(new LoyaltyTransaction
+                // Never trust a client-supplied value.
+                updated.PointsEarned = CalculatePointsEarned(finalAmount);
+
+                int oldDelta = transaction.PointsEarned - transaction.PointsUsed;
+                int newDelta = updated.PointsEarned - updated.PointsUsed;
+                customer.LoyaltyPoints += (newDelta - oldDelta);
+
+                var linkedLoyalty = await tenantDb.LoyaltyTransactions
+                    .FirstOrDefaultAsync(x => x.SalesTransactionId == id && x.TransactionType == "Sale");
+
+                if (linkedLoyalty != null)
                 {
-                    CustomerId = transaction.CustomerId,
-                    SalesTransactionId = transaction.TransactionId,
-                    PointsEarned = updated.PointsEarned,
-                    PointsUsed = updated.PointsUsed,
-                    TransactionType = "Sale",
-                    Date = updated.TransactionDate
-                });
+                    linkedLoyalty.PointsEarned = updated.PointsEarned;
+                    linkedLoyalty.PointsUsed = updated.PointsUsed;
+                    linkedLoyalty.Date = updated.TransactionDate;
+                }
+                else if (updated.PointsEarned != 0 || updated.PointsUsed != 0)
+                {
+                    tenantDb.LoyaltyTransactions.Add(new LoyaltyTransaction
+                    {
+                        CustomerId = transaction.CustomerId,
+                        SalesTransactionId = transaction.TransactionId,
+                        PointsEarned = updated.PointsEarned,
+                        PointsUsed = updated.PointsUsed,
+                        TransactionType = "Sale",
+                        Date = updated.TransactionDate
+                    });
+                }
+            }
+            else
+            {
+                updated.PointsEarned = transaction.PointsEarned;
+                updated.PointsUsed = transaction.PointsUsed;
             }
 
             transaction.PromotionId = updated.PromotionId;
@@ -361,7 +528,7 @@ namespace freshcrumbs.CRM.api.Controllers
             transaction.PointsEarned = updated.PointsEarned;
             transaction.FinalAmount = finalAmount;
             transaction.PaymentMethod = updated.PaymentMethod;
-            transaction.Status = updated.Status;
+            transaction.Status = "Completed";
 
             await tenantDb.SaveChangesAsync();
 
@@ -369,6 +536,7 @@ namespace freshcrumbs.CRM.api.Controllers
         }
 
         [HttpDelete("{id:int}")]
+        [RequireTenantPermission(TenantPermissions.ManageSales)]
         public async Task<IActionResult> DeleteSalesTransaction(int companyId, int id)
         {
             await using var tenantDb = await _tenantFactory.CreateAsync(companyId);
@@ -381,6 +549,11 @@ namespace freshcrumbs.CRM.api.Controllers
                 return NotFound($"SalesTransaction with id {id} not found.");
             }
 
+            if (!await BranchStock.CanChangeSaleAsync(HttpContext, tenantDb, transaction.BranchId))
+            {
+                return OtherBranch();
+            }
+
             if (string.Equals(transaction.Status, "Completed", StringComparison.OrdinalIgnoreCase))
             {
                 return Conflict("A completed transaction cannot be deleted. Cancel it first so its stock and loyalty points are restored.");
@@ -390,6 +563,62 @@ namespace freshcrumbs.CRM.api.Controllers
             await tenantDb.SaveChangesAsync();
 
             return NoContent();
+        }
+
+        // Branching plans: ADMIN uses the selected branch (or their assigned one); MANAGER / STAFF always use their
+        // assigned branch. Other plans never store a branch, so their sales behave exactly as before.
+        private async Task<IActionResult?> AssignSaleBranchAsync(
+            freshcrumbs.CRM.infrastructure.data.TenantCrmDbContext tenantDb,
+            SalesTransaction transaction)
+        {
+            if (!BranchStock.IsBranchingCompany(HttpContext))
+            {
+                transaction.BranchId = null;
+                return null;
+            }
+
+            var assigned = await BranchStock.GetAssignedBranchAsync(tenantDb, User);
+
+            if (!BranchStock.IsAdmin(HttpContext))
+            {
+                if (assigned == null)
+                {
+                    return StatusCode(StatusCodes.Status403Forbidden, new
+                    {
+                        code = "NoBranchAssigned",
+                        message = "You are not assigned to a branch. Ask your administrator to assign you to a branch before recording sales."
+                    });
+                }
+
+                transaction.BranchId = assigned.BranchId;
+                return null;
+            }
+
+            transaction.BranchId ??= assigned?.BranchId;
+
+            if (transaction.BranchId == null)
+            {
+                return BadRequest(new { message = "Select the branch for this sale." });
+            }
+
+            bool branchIsActive = await tenantDb.Branches
+                .AnyAsync(b => b.BranchId == transaction.BranchId.Value && b.Status == "Active");
+
+            if (!branchIsActive)
+            {
+                return BadRequest(new { message = "The selected branch does not exist or is inactive." });
+            }
+
+            return null;
+        }
+
+        private ObjectResult OtherBranch()
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new
+            {
+                code = "OtherBranch",
+                message = "This sale belongs to another branch."
+            });
         }
 
         private static async Task<string?> ValidateEligibilityAsync(
@@ -460,11 +689,42 @@ namespace freshcrumbs.CRM.api.Controllers
             };
         }
 
-        private static string? ValidatePromotion(Promotion promotion, DateTime transactionDate, decimal totalAmount)
+        // Payment method from the fixed list (standard spelling; an older value already on the sale may stay) and a
+        // real, non-future sale date.
+        private static string? ValidateSaleFields(SalesTransaction sale, SalesTransaction? existing)
+        {
+            string? payment = InputRules.OneOf(sale.PaymentMethod, PaymentMethods)
+                ?? (existing != null && sale.PaymentMethod == existing.PaymentMethod ? existing.PaymentMethod : null);
+
+            if (payment == null)
+            {
+                return "Select a payment method: " + string.Join(", ", PaymentMethods) + ".";
+            }
+
+            sale.PaymentMethod = payment;
+
+            if (!InputRules.IsRecordDate(sale.TransactionDate))
+            {
+                return "The sale date must be a valid date and cannot be in the future.";
+            }
+
+            return null;
+        }
+
+        private static readonly string[] PaymentMethods = { "Cash", "GCash", "Card", "Bank Transfer" };
+
+        // saleBranchId is always the server-set branch of the sale. A branch promotion applies only at its branch; on a
+        // plan without branches (sale branch = null) it never applies, so it cannot silently become company-wide.
+        private static string? ValidatePromotion(Promotion promotion, DateTime transactionDate, decimal totalAmount, int? saleBranchId)
         {
             if (!string.Equals(promotion.Status, "Active", StringComparison.OrdinalIgnoreCase))
             {
                 return $"Promotion \"{promotion.PromotionName}\" is not active.";
+            }
+
+            if (promotion.BranchId != null && promotion.BranchId != saleBranchId)
+            {
+                return $"Promotion \"{promotion.PromotionName}\" is only available at its own branch.";
             }
 
             if (transactionDate < promotion.StartDate || transactionDate > promotion.EndDate)
@@ -527,6 +787,7 @@ namespace freshcrumbs.CRM.api.Controllers
                 transaction.TransactionId,
                 transaction.CustomerId,
                 transaction.PromotionId,
+                transaction.BranchId,
                 transaction.TransactionDate,
                 transaction.TotalAmount,
                 transaction.DiscountAmount,

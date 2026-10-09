@@ -2,7 +2,9 @@
 using freshcrumbs.CRM.api.Services;
 using freshcrumbs.CRM.domain.entities;
 using freshcrumbs.CRM.infrastructure.data;
+using freshcrumbs.CRM.infrastructure.services;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
@@ -19,11 +21,22 @@ namespace freshcrumbs.CRM.api.Controllers
 
         private readonly MasterCrmDbContext _db;
         private readonly ISubscriptionService _subscriptions;
+        private readonly UserManager<ApplicationUser> _userManager;
+        private readonly IConfiguration _configuration;
+        private readonly ITenantDbContextFactory _tenantFactory;
 
-        public SubscribersController(MasterCrmDbContext db, ISubscriptionService subscriptions)
+        public SubscribersController(
+            MasterCrmDbContext db,
+            ISubscriptionService subscriptions,
+            UserManager<ApplicationUser> userManager,
+            IConfiguration configuration,
+            ITenantDbContextFactory tenantFactory)
         {
             _db = db;
             _subscriptions = subscriptions;
+            _userManager = userManager;
+            _configuration = configuration;
+            _tenantFactory = tenantFactory;
         }
 
         public class RegisterRequest
@@ -35,7 +48,26 @@ namespace freshcrumbs.CRM.api.Controllers
             public string Email { get; set; } = string.Empty;
             public int PlanId { get; set; }
             public DateTime StartDate { get; set; }
+
+            // The company's first ADMIN (always ADMIN; the email is the sign-in name).
+            public string? AdminFirstName { get; set; }
+            public string? AdminLastName { get; set; }
+            public string? AdminEmail { get; set; }
+            public string? AdminContactNumber { get; set; }
+
+            // Key of the company's existing database under TenantCredentials in the cloud configuration.
+            public string? DatabaseKey { get; set; }
         }
+
+        public class AdminRequest
+        {
+            public string? FirstName { get; set; }
+            public string? LastName { get; set; }
+            public string? Email { get; set; }
+            public string? ContactNumber { get; set; }
+        }
+
+        private sealed record AdminInput(string FirstName, string LastName, string Email, string ContactNumber);
 
         public class ChangePlanRequest
         {
@@ -133,9 +165,29 @@ namespace freshcrumbs.CRM.api.Controllers
                 return BadRequest(new { message = error });
             }
 
+            var admin = ValidateAdmin(request.AdminFirstName, request.AdminLastName, request.AdminEmail, request.AdminContactNumber, out error);
+
+            if (admin == null)
+            {
+                return BadRequest(new { message = error });
+            }
+
             if (await _db.Companies.AnyAsync(c => c.CompanyCode == code))
             {
                 return Conflict(new { message = $"Company code '{code}' is already in use." });
+            }
+
+            if (await TenantAccounts.IsEmailInUseAsync(_userManager, _db, admin.Email, null))
+            {
+                return Conflict(new { message = "Another account already uses the Admin email address." });
+            }
+
+            // Checked before anything is saved, so a bad key never leaves a half-registered company.
+            var (database, databaseError) = await CheckDatabaseKeyAsync(request.DatabaseKey);
+
+            if (database == null)
+            {
+                return BadRequest(new { message = databaseError });
             }
 
             await using var transaction = await _db.Database.BeginTransactionAsync();
@@ -164,10 +216,191 @@ namespace freshcrumbs.CRM.api.Controllers
                 return BadRequest(new { message = result.Error });
             }
 
+            _db.CompanyDatabases.Add(new CompanyDatabase
+            {
+                CompanyId = company.CompanyId,
+                ServerName = database.ServerName,
+                DatabaseName = database.DatabaseName,
+                CredentialKey = database.CredentialKey,
+                IsActive = true
+            });
+            await _db.SaveChangesAsync();
+
+            // A new company has no accounts yet and every plan allows at least one user, so the seat check is not
+            // needed here (it would also refuse a plan that starts later).
+            var (user, temporaryPassword, adminError) = await CreateAdminAsync(company.CompanyId, admin, checkSeats: false);
+
+            if (user == null)
+            {
+                await transaction.RollbackAsync();
+                return BadRequest(new { message = adminError });
+            }
+
             await transaction.CommitAsync();
 
             var detail = await BuildDetailAsync(company.CompanyId);
-            return Created($"api/platform/subscribers/{company.CompanyId}", detail);
+
+            return Created($"api/platform/subscribers/{company.CompanyId}", new
+            {
+                Subscriber = detail,
+                Admin = AdminResult(user, temporaryPassword!)
+            });
+        }
+
+        // A company whose first ADMIN is missing (or was deactivated) gets one, the same way as at registration.
+        [HttpPost("{companyId:int}/admin")]
+        public async Task<IActionResult> CreateAdmin(int companyId, AdminRequest request)
+        {
+            var admin = ValidateAdmin(request.FirstName, request.LastName, request.Email, request.ContactNumber, out var error);
+
+            if (admin == null)
+            {
+                return BadRequest(new { message = error });
+            }
+
+            if (!await _db.Companies.AnyAsync(c => c.CompanyId == companyId))
+            {
+                return NotFound(new { message = $"Company with id {companyId} not found." });
+            }
+
+            if (await _db.Users.AnyAsync(u => u.TenantId == companyId && u.Role == TenantRoles.Admin && u.Status == TenantAccounts.Active))
+            {
+                return Conflict(new { message = "This company already has an active Admin account." });
+            }
+
+            if (await TenantAccounts.IsEmailInUseAsync(_userManager, _db, admin.Email, null))
+            {
+                return Conflict(new { message = "Another account already uses this email address." });
+            }
+
+            await using var transaction = await _db.Database.BeginTransactionAsync();
+
+            var (user, temporaryPassword, adminError) = await CreateAdminAsync(companyId, admin, checkSeats: true);
+
+            if (user == null)
+            {
+                await transaction.RollbackAsync();
+                return BadRequest(new { message = adminError });
+            }
+
+            await transaction.CommitAsync();
+
+            return Ok(AdminResult(user, temporaryPassword!));
+        }
+
+        private static AdminInput? ValidateAdmin(string? firstName, string? lastName, string? email, string? contactNumber, out string? error)
+        {
+            var input = new AdminInput(
+                (firstName ?? string.Empty).Trim(),
+                (lastName ?? string.Empty).Trim(),
+                (email ?? string.Empty).Trim(),
+                (contactNumber ?? string.Empty).Trim());
+
+            error = TenantAccounts.ValidateProfile(input.FirstName, input.LastName, input.Email, input.ContactNumber);
+            return error == null ? input : null;
+        }
+
+        // ADMIN of this company only, no branch assignment (company-wide), one-time temporary password.
+        // Runs inside the caller's transaction.
+        private async Task<(ApplicationUser? User, string? TemporaryPassword, string? Error)> CreateAdminAsync(
+            int companyId, AdminInput admin, bool checkSeats)
+        {
+            var seatError = checkSeats ? await _subscriptions.CheckCanActivateUserAsync(companyId) : null;
+
+            if (seatError != null)
+            {
+                return (null, null, seatError);
+            }
+
+            var user = new ApplicationUser
+            {
+                UserName = admin.Email,
+                Email = admin.Email,
+                TenantId = companyId,
+                FirstName = admin.FirstName,
+                LastName = admin.LastName,
+                ContactNumber = admin.ContactNumber,
+                Role = TenantRoles.Admin,
+                Status = TenantAccounts.Active
+            };
+
+            var (temporaryPassword, error) = await TenantAccounts.CreateWithTemporaryPasswordAsync(_userManager, user);
+
+            if (temporaryPassword == null)
+            {
+                return (null, null, error);
+            }
+
+            return (user, temporaryPassword, null);
+        }
+
+        private static object AdminResult(ApplicationUser user, string temporaryPassword)
+        {
+            return new
+            {
+                user.Id,
+                FullName = $"{user.FirstName} {user.LastName}".Trim(),
+                user.Email,
+                TemporaryPassword = temporaryPassword
+            };
+        }
+
+        // The tenant database already exists (created in MonsterASP); its credentials are in the cloud configuration
+        // under TenantCredentials:{key} (UserId, Password, Server, Database). Nothing secret is returned to the client.
+        // The key must not be mapped to another company, the database must answer, and its tables must be up to date.
+        private async Task<(TenantDatabaseInfo? Database, string? Error)> CheckDatabaseKeyAsync(string? databaseKey)
+        {
+            var key = (databaseKey ?? string.Empty).Trim();
+
+            if (key.Length == 0)
+            {
+                return (null, "Enter the database key of the company's tenant database.");
+            }
+
+            var section = _configuration.GetSection($"TenantCredentials:{key}");
+            var server = section["Server"];
+            var databaseName = section["Database"];
+
+            if (string.IsNullOrWhiteSpace(section["UserId"]) || string.IsNullOrWhiteSpace(section["Password"]))
+            {
+                return (null, $"The database key \"{key}\" is not in the cloud configuration.");
+            }
+
+            if (string.IsNullOrWhiteSpace(server) || string.IsNullOrWhiteSpace(databaseName))
+            {
+                return (null, $"The database key \"{key}\" has no Server and Database names in the cloud configuration.");
+            }
+
+            bool alreadyMapped = await _db.CompanyDatabases.AnyAsync(d =>
+                d.CredentialKey == key || (d.ServerName == server && d.DatabaseName == databaseName));
+
+            if (alreadyMapped)
+            {
+                return (null, $"The database for key \"{key}\" is already assigned to another company.");
+            }
+
+            var info = new TenantDatabaseInfo { ServerName = server, DatabaseName = databaseName, CredentialKey = key };
+
+            try
+            {
+                await using var tenantDb = _tenantFactory.CreateForDatabase(info);
+
+                if (!await tenantDb.Database.CanConnectAsync())
+                {
+                    return (null, $"The database for key \"{key}\" could not be reached. Check the database and its credentials.");
+                }
+
+                if ((await tenantDb.Database.GetPendingMigrationsAsync()).Any())
+                {
+                    return (null, $"The database for key \"{key}\" does not have the current FreshCrumbs tables. Run the tenant migration script on it first.");
+                }
+            }
+            catch (Exception)
+            {
+                return (null, $"The database for key \"{key}\" could not be opened. Check the database and its credentials.");
+            }
+
+            return (info, null);
         }
 
         [HttpPost("{companyId:int}/change-plan")]

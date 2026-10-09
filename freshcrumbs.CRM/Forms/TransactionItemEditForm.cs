@@ -127,6 +127,8 @@ namespace freshcrumbs.CRM.winforms.Forms
                 DecimalPlaces = 2,
                 Minimum = 0,
                 Maximum = 999999,
+                // Shown for reference only: the server always uses the product's current price.
+                Enabled = false,
                 Margin = new Padding(0, 0, 0, 14)
             };
             root.Controls.Add(_unitPriceBox);

@@ -12,6 +12,8 @@ namespace freshcrumbs.CRM.winforms.Forms
             public int PointsEarned { get; set; }
             public int PointsUsed { get; set; }
             public string TransactionType { get; set; } = string.Empty;
+            public string Branch { get; set; } = string.Empty;
+            public bool CanModify { get; set; }
         }
 
         private readonly ApiService _apiService;
@@ -138,10 +140,18 @@ namespace freshcrumbs.CRM.winforms.Forms
                 HeaderText = "Type",
                 Name = "TransactionType"
             });
+            _grid.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                DataPropertyName = "Branch",
+                HeaderText = "Branch",
+                Name = "Branch",
+                Visible = TenantCapabilities.HasBranching
+            });
 
             _grid.SelectionChanged += (s, e) =>
             {
-                _deleteButton.Enabled = _grid.SelectedRows.Count > 0;
+                _deleteButton.Enabled = _grid.SelectedRows.Count > 0
+                    && _grid.SelectedRows[0].DataBoundItem is BreakdownRow { CanModify: true };
             };
 
             BindGrid();
@@ -160,7 +170,9 @@ namespace freshcrumbs.CRM.winforms.Forms
                     Date = t.Date.ToString("MM/dd/yyyy"),
                     PointsEarned = t.PointsEarned,
                     PointsUsed = t.PointsUsed,
-                    TransactionType = t.TransactionType
+                    TransactionType = t.TransactionType,
+                    Branch = t.BranchName ?? string.Empty,
+                    CanModify = t.CanModify
                 })
                 .ToList();
 
@@ -198,7 +210,7 @@ namespace freshcrumbs.CRM.winforms.Forms
             }
             catch (Exception ex)
             {
-                _statusLabel.Text = $"Failed to delete: {ErrorMessageHelper.GetFriendlyMessage(ex)}";
+                _statusLabel.Text = $"Failed to delete: {BranchUi.GetMessage(ex)}";
                 _deleteButton.Enabled = true;
             }
         }

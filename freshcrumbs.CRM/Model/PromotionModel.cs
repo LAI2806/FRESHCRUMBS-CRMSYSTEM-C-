@@ -23,5 +23,13 @@
         public string Status { get; set; } = string.Empty;
 
         public string? EligibilityCategory { get; set; }
+
+        // PREMIUM: null = company-wide; a value = only valid at that branch.
+        public int? BranchId { get; set; }
+
+        public string? BranchName { get; set; }
+
+        // Decided by the server for the signed-in user (PREMIUM MANAGER: only their own branch's promotions).
+        public bool CanManage { get; set; } = true;
     }
 }

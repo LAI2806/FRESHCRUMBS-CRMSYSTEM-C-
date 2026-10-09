@@ -24,6 +24,8 @@ namespace freshcrumbs.CRM.winforms.UserControls
         private Button _addButton = null!;
         private Button _editButton = null!;
         private Button _deleteButton = null!;
+        private Button _eligibilityButton = null!;
+        private ComboBox? _branchFilter;
         private Label _statusLabel = null!;
         private Panel _pagerPanel = null!;
         private Label _pageInfoLabel = null!;
@@ -98,6 +100,22 @@ namespace freshcrumbs.CRM.winforms.UserControls
             _statusFilterBox.SelectedIndexChanged += StatusFilterBox_SelectedIndexChanged;
             toolbarPanel.Controls.Add(_statusFilterBox);
 
+            // PREMIUM: optional filter on the company-wide list (customers registered at or buying at a branch).
+            if (TenantCapabilities.CanFilterCustomersByBranch)
+            {
+                _branchFilter = new ComboBox
+                {
+                    Location = new Point(540, 10),
+                    Width = 200,
+                    Height = 34,
+                    Font = new Font("Segoe UI", 10),
+                    DropDownStyle = ComboBoxStyle.DropDownList,
+                    FlatStyle = FlatStyle.Flat
+                };
+                _branchFilter.SelectedIndexChanged += (s, e) => ApplyFilters();
+                toolbarPanel.Controls.Add(_branchFilter);
+            }
+
             _addButton = CreateActionButton("+  Add Customer", AccentColor, Color.White, 160);
             _addButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             _addButton.Click += AddButton_Click;
@@ -118,6 +136,23 @@ namespace freshcrumbs.CRM.winforms.UserControls
             _deleteButton.Enabled = false;
             _deleteButton.Click += DeleteButton_Click;
             toolbarPanel.Controls.Add(_deleteButton);
+
+            // STAFF: Senior/PWD eligibility only (a cashier task); the rest of the customer record stays read-only.
+            _eligibilityButton = CreateActionButton("Senior/PWD", Color.White, LabelGray, 120);
+            _eligibilityButton.FlatAppearance.BorderSize = 1;
+            _eligibilityButton.FlatAppearance.BorderColor = BorderColor;
+            _eligibilityButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            _eligibilityButton.Enabled = false;
+            _eligibilityButton.Visible = !TenantCapabilities.CanManageCustomers && TenantCapabilities.CanProcessSeniorPwdDiscount;
+            _eligibilityButton.Click += EligibilityButton_Click;
+            toolbarPanel.Controls.Add(_eligibilityButton);
+
+            // STAFF may record and view customers; editing and deactivating is a management action (API enforces it too).
+            if (!TenantCapabilities.CanManageCustomers)
+            {
+                _editButton.Visible = false;
+                _deleteButton.Visible = false;
+            }
 
             toolbarPanel.Resize += (s, e) => PositionToolbarButtons(toolbarPanel);
             PositionToolbarButtons(toolbarPanel);
@@ -188,6 +223,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
             _addButton.Location = new Point(toolbarPanel.Width - _addButton.Width, 8);
             _editButton.Location = new Point(_addButton.Left - _editButton.Width - 10, 8);
             _deleteButton.Location = new Point(_editButton.Left - _deleteButton.Width - 10, 8);
+            _eligibilityButton.Location = new Point(_addButton.Left - _eligibilityButton.Width - 10, 8);
         }
 
         private Button CreateActionButton(string text, Color backColor, Color foreColor, int width)
@@ -317,6 +353,12 @@ namespace freshcrumbs.CRM.winforms.UserControls
             {
                 _statusLabel.Text = "";
                 _customers = await _apiService.GetCustomersAsync(_companyId, includeInactive: true);
+
+                if (_branchFilter != null && _branchFilter.Items.Count == 0)
+                {
+                    await PopulateBranchFilterAsync();
+                }
+
                 ApplyFilters();
             }
             catch (Exception ex)
@@ -343,6 +385,11 @@ namespace freshcrumbs.CRM.winforms.UserControls
             SetColumnHeader("ContactNo", "Contact No.");
             SetColumnHeader("Address", "Address");
             SetColumnHeader("LoyaltyPoints", "Points");
+
+            if (!TenantCapabilities.CanUseLoyalty && _customerGrid.Columns["LoyaltyPoints"] != null)
+            {
+                _customerGrid.Columns["LoyaltyPoints"].Visible = false;
+            }
             SetColumnHeader("Status", "Status");
 
             if (_customerGrid.Columns["DiscountEligibilities"] != null)
@@ -351,6 +398,17 @@ namespace freshcrumbs.CRM.winforms.UserControls
             }
 
             SetColumnHeader("DiscountEligibilitySummary", "Discount Eligibility");
+
+            if (_customerGrid.Columns["BranchId"] != null)
+            {
+                _customerGrid.Columns["BranchId"].Visible = false;
+            }
+
+            if (_customerGrid.Columns["BranchNames"] != null)
+            {
+                _customerGrid.Columns["BranchNames"].Visible = TenantCapabilities.HasBranching;
+                _customerGrid.Columns["BranchNames"].HeaderText = "Branches";
+            }
         }
 
         private void SetColumnHeader(string columnName, string headerText)
@@ -377,6 +435,15 @@ namespace freshcrumbs.CRM.winforms.UserControls
             string statusFilter = _statusFilterBox.SelectedItem?.ToString() ?? "All Customers";
 
             IEnumerable<CustomerModel> filtered = _customers;
+
+            if (_branchFilter?.SelectedItem is BranchModel branch && branch.BranchId != AllBranches)
+            {
+                filtered = branch.BranchId == NoBranch
+                    ? filtered.Where(c => string.IsNullOrEmpty(c.BranchNames))
+                    : filtered.Where(c => (c.BranchNames ?? string.Empty)
+                        .Split(", ", StringSplitOptions.RemoveEmptyEntries)
+                        .Contains(branch.BranchName, StringComparer.OrdinalIgnoreCase));
+            }
 
             if (statusFilter == "Active Customers")
             {
@@ -411,6 +478,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
             bool hasSelection = _customerGrid.SelectedRows.Count > 0;
             _editButton.Enabled = hasSelection;
             _deleteButton.Enabled = hasSelection;
+            _eligibilityButton.Enabled = hasSelection;
         }
 
         private string GenerateNextCustomerCode()
@@ -436,7 +504,19 @@ namespace freshcrumbs.CRM.winforms.UserControls
 
         private async void AddButton_Click(object? sender, EventArgs e)
         {
-            string suggestedCode = GenerateNextCustomerCode();
+            // The server counts every customer of the company; the list on screen may show one branch only.
+            // The local list is only a fallback (e.g. an older API without the endpoint); the server still rejects duplicates.
+            string suggestedCode;
+
+            try
+            {
+                suggestedCode = await _apiService.GetNextCustomerCodeAsync(_companyId) ?? GenerateNextCustomerCode();
+            }
+            catch
+            {
+                suggestedCode = GenerateNextCustomerCode();
+            }
+
             using var form = new CustomerEditForm(null, suggestedCode);
             if (form.ShowDialog(this) != DialogResult.OK)
             {
@@ -451,7 +531,60 @@ namespace freshcrumbs.CRM.winforms.UserControls
             }
             catch (Exception ex)
             {
-                _statusLabel.Text = $"Failed to create customer: {ErrorMessageHelper.GetFriendlyMessage(ex)}";
+                _statusLabel.Text = $"Failed to create customer: {BranchUi.GetMessage(ex)}";
+            }
+        }
+
+        private const int AllBranches = -1;
+        private const int NoBranch = 0;
+
+        private async Task PopulateBranchFilterAsync()
+        {
+            if (_branchFilter == null)
+            {
+                return;
+            }
+
+            var branches = await _apiService.GetBranchesAsync(_companyId);
+            int selected = (_branchFilter.SelectedItem as BranchModel)?.BranchId ?? AllBranches;
+
+            _branchFilter.Items.Clear();
+            _branchFilter.Items.Add(new BranchModel { BranchId = AllBranches, BranchName = "All Branches" });
+
+            foreach (var branch in branches.Where(b => string.Equals(b.Status, "Active", StringComparison.OrdinalIgnoreCase)))
+            {
+                _branchFilter.Items.Add(branch);
+            }
+
+            _branchFilter.Items.Add(new BranchModel { BranchId = NoBranch, BranchName = "No branch" });
+
+            _branchFilter.SelectedItem = _branchFilter.Items.OfType<BranchModel>().FirstOrDefault(b => b.BranchId == selected)
+                ?? _branchFilter.Items[0];
+        }
+
+        private async void EligibilityButton_Click(object? sender, EventArgs e)
+        {
+            if (_customerGrid.SelectedRows.Count == 0 ||
+                _customerGrid.SelectedRows[0].DataBoundItem is not CustomerModel selectedCustomer)
+            {
+                return;
+            }
+
+            using var form = new CustomerEditForm(selectedCustomer, eligibilityOnly: true);
+            if (form.ShowDialog(this) != DialogResult.OK)
+            {
+                return;
+            }
+
+            try
+            {
+                await _apiService.UpdateCustomerEligibilitiesAsync(_companyId, selectedCustomer.CustomerId, form.Result.DiscountEligibilities);
+                await LoadCustomersAsync();
+                _statusLabel.Text = "";
+            }
+            catch (Exception ex)
+            {
+                _statusLabel.Text = $"Failed to update Senior/PWD eligibility: {BranchUi.GetMessage(ex)}";
             }
         }
 

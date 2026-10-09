@@ -12,12 +12,41 @@ using System.Security.Claims;
 using System.Text;
 using freshcrumbs.CRM.api.Authorization;
 using freshcrumbs.CRM.api.Services;
+using freshcrumbs.CRM.api.Services.Sync;
+using Microsoft.AspNetCore.DataProtection;
+using Microsoft.Data.SqlClient;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Sync:Mode = "Cloud" (default) keeps the API exactly as before (cloud databases).
+// Sync:Mode = "Local" runs the API on the desktop against SQL Server Express and synchronizes with the cloud API.
+var syncOptions = builder.Configuration.GetSection("Sync").Get<SyncOptions>() ?? new SyncOptions();
+builder.Services.AddSingleton(syncOptions);
+
+// Remote SQL connections: let SqlClient transparently re-open a connection that the host/network dropped while it
+// sat idle in the pool (the "error 19 - Physical connection is not usable" case) instead of failing the request.
+static string? WithConnectResilience(string? connectionString)
+{
+    if (string.IsNullOrWhiteSpace(connectionString))
+    {
+        return connectionString;
+    }
+
+    var csb = new SqlConnectionStringBuilder(connectionString)
+    {
+        ConnectRetryCount = 3,
+        ConnectRetryInterval = 5,
+        ConnectTimeout = 30
+    };
+
+    return csb.ConnectionString;
+}
+
 builder.Services.AddDbContext<MasterCrmDbContext>(options =>
   options.UseSqlServer(
-    builder.Configuration.GetConnectionString("DB_MasterCRM")));
+    syncOptions.IsLocal
+        ? builder.Configuration.GetConnectionString("LocalMaster")
+        : WithConnectResilience(builder.Configuration.GetConnectionString("DB_MasterCRM"))));
 
 builder.Services.AddIdentity<ApplicationUser, IdentityRole>()
     .AddEntityFrameworkStores<MasterCrmDbContext>()
@@ -70,8 +99,28 @@ builder.Services.AddDbContext<TenantCrmDbContext>(options =>
 builder.Services.AddScoped<ITenantDatabaseResolver, TenantDatabaseResolver>();
 builder.Services.AddScoped<ITenantDbContextFactory, TenantDbContextFactory>();
 
-builder.Services.AddScoped<ISubscriptionService, SubscriptionService>();
-builder.Services.AddScoped<ITermsService, TermsService>();
+builder.Services.AddScoped<CloudSyncApplier>();
+
+if (syncOptions.IsLocal)
+{
+    // Desktop: users, plan rules and terms come from the snapshot the cloud supplied at the last online
+    // validation (see LocalAccessCache), so BASIC/STANDARD/PREMIUM keep being enforced offline.
+    builder.Services.AddDataProtection().SetApplicationName("FreshCrumbs.Local");
+    builder.Services.AddSingleton<SyncStatusService>();
+    builder.Services.AddSingleton<LocalAccessCache>();
+    builder.Services.AddSingleton<CloudApiClient>();
+    builder.Services.AddSingleton<CloudSessionTokens>();
+    builder.Services.AddSingleton<LocalLoginService>();
+    builder.Services.AddSingleton<SyncEngine>();
+    builder.Services.AddScoped<ISubscriptionService, LocalSubscriptionService>();
+    builder.Services.AddScoped<ITermsService, LocalTermsService>();
+    builder.Services.AddHostedService<SyncWorker>();
+}
+else
+{
+    builder.Services.AddScoped<ISubscriptionService, SubscriptionService>();
+    builder.Services.AddScoped<ITermsService, TermsService>();
+}
 
 builder.Services.AddControllers(options =>
 {
@@ -99,9 +148,19 @@ app.UseAuthorization();
 
 app.MapControllers();
 
-using (var scope = app.Services.CreateScope())
+if (!syncOptions.IsLocal)
 {
+    // Platform (SuperAdmin) data only exists in the cloud.
+    using var scope = app.Services.CreateScope();
     await SuperAdminSeeder.SeedAsync(scope.ServiceProvider);
+}
+
+var demoSeedCompanyId = builder.Configuration.GetValue<int?>("DemoSeed:CompanyId");
+
+if (demoSeedCompanyId.HasValue)
+{
+    using var demoScope = app.Services.CreateScope();
+    await TenantDemoDataSeeder.SeedAsync(demoScope.ServiceProvider, demoSeedCompanyId.Value);
 }
 
 app.Run();

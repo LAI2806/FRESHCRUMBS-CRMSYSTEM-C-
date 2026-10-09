@@ -1,7 +1,13 @@
 ﻿namespace freshcrumbs.CRM.domain.entities
 {
-    public class TransactionItem
+    public class TransactionItem : ISyncEntity
     {
+        // Sync identity (offline-first): global id used to match records between local and cloud databases.
+        public Guid RowGuid { get; set; } = Guid.NewGuid();
+
+        // UTC time of the last change; used for conflict resolution and incremental pull.
+        public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+
         public int TransactionItemId { get; set; }
 
         public int TransactionId { get; set; }

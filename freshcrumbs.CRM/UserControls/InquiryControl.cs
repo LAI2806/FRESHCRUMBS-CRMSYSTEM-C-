@@ -46,6 +46,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
             public string Concern { get; set; } = string.Empty;
             public string Status { get; set; } = string.Empty;
             public string RespondedBy { get; set; } = string.Empty;
+            public string BranchName { get; set; } = string.Empty;
         }
 
         public InquiryControl(int companyId)
@@ -97,6 +98,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
             };
             _searchBox.TextChanged += (s, e) => BindGrid();
             toolbarPanel.Controls.Add(_searchBox);
+            AddBranchFilter(toolbarPanel);
 
             _addButton = CreateActionButton("+  New Inquiry", AccentColor, Color.White, 150);
             _addButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
@@ -118,6 +120,13 @@ namespace freshcrumbs.CRM.winforms.UserControls
             _deleteButton.Enabled = false;
             _deleteButton.Click += DeleteButton_Click;
             toolbarPanel.Controls.Add(_deleteButton);
+
+            // STAFF may record inquiries; reviewing/processing and deleting is a management action.
+            if (!TenantCapabilities.CanManageInquiries)
+            {
+                _editButton.Visible = false;
+                _deleteButton.Visible = false;
+            }
 
             toolbarPanel.Resize += (s, e) => PositionToolbarButtons(toolbarPanel);
 
@@ -289,6 +298,12 @@ namespace freshcrumbs.CRM.winforms.UserControls
             _inquiryGrid.DataSource = null;
             _inquiryGrid.DataSource = pageItems;
 
+            if (_inquiryGrid.Columns["BranchName"] != null)
+            {
+                _inquiryGrid.Columns["BranchName"].Visible = TenantCapabilities.HasBranching;
+                _inquiryGrid.Columns["BranchName"].HeaderText = "Branch";
+            }
+
             if (_inquiryGrid.Columns["InquiryId"] != null)
             {
                 _inquiryGrid.Columns["InquiryId"].Visible = false;
@@ -329,6 +344,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
                 // Include inactive customers so older records still show their Customer Code and name.
                 _customers = await _apiService.GetCustomersAsync(_companyId, includeInactive: true);
                 _inquiries = await _apiService.GetInquiriesAsync(_companyId);
+                await PopulateBranchFilterAsync();
                 BindGrid();
             }
             catch (Exception ex)
@@ -337,11 +353,65 @@ namespace freshcrumbs.CRM.winforms.UserControls
             }
         }
 
+        private const int AllBranches = -1;
+        private const int NoBranch = 0;
+        private ComboBox? _branchFilter;
+
+        // PREMIUM ADMIN only: filter by branch. MANAGER / STAFF already receive only their branch from the API.
+        private void AddBranchFilter(Panel toolbarPanel)
+        {
+            if (!TenantCapabilities.CanFilterByBranch)
+            {
+                return;
+            }
+
+            _branchFilter = new ComboBox
+            {
+                Location = new Point(330, 10),
+                Width = 200,
+                Height = 34,
+                Font = new Font("Segoe UI", 10),
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                FlatStyle = FlatStyle.Flat
+            };
+            _branchFilter.SelectedIndexChanged += (s, e) => BindGrid();
+            toolbarPanel.Controls.Add(_branchFilter);
+        }
+
+        private async Task PopulateBranchFilterAsync()
+        {
+            if (_branchFilter == null || _branchFilter.Items.Count > 0)
+            {
+                return;
+            }
+
+            var branches = await _apiService.GetBranchesAsync(_companyId);
+
+            _branchFilter.Items.Add(new BranchModel { BranchId = AllBranches, BranchName = "All Branches" });
+
+            foreach (var branch in branches.Where(b => string.Equals(b.Status, "Active", StringComparison.OrdinalIgnoreCase)))
+            {
+                _branchFilter.Items.Add(branch);
+            }
+
+            _branchFilter.Items.Add(new BranchModel { BranchId = NoBranch, BranchName = "No branch (earlier records)" });
+            _branchFilter.SelectedIndex = 0;
+        }
+
+        private bool MatchesBranchFilter(int? branchId)
+        {
+            int selected = (_branchFilter?.SelectedItem as BranchModel)?.BranchId ?? AllBranches;
+
+            return selected == AllBranches
+                || (selected == NoBranch ? branchId == null : branchId == selected);
+        }
+
         private void BindGrid(bool resetPage = true)
         {
             string term = _searchBox?.Text.Trim().ToLowerInvariant() ?? "";
 
             _filteredRows = _inquiries
+                .Where(x => MatchesBranchFilter(x.BranchId))
                 .Select(i => new InquiryDisplayRow
                 {
                     InquiryId = i.InquiryId,
@@ -352,7 +422,8 @@ namespace freshcrumbs.CRM.winforms.UserControls
                     Source = i.Source,
                     Concern = i.Message,
                     Status = i.Status,
-                    RespondedBy = i.RespondedBy
+                    RespondedBy = i.RespondedBy,
+                    BranchName = i.BranchName ?? string.Empty
                 })
                 .Where(row =>
                     string.IsNullOrEmpty(term) ||

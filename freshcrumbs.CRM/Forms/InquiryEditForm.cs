@@ -187,6 +187,7 @@ namespace freshcrumbs.CRM.winforms.Forms
 
             _concernBox = new TextBox
             {
+                MaxLength = 1000,
                 Width = 380,
                 Height = 80,
                 Multiline = true,
@@ -221,6 +222,7 @@ namespace freshcrumbs.CRM.winforms.Forms
 
             _responseBox = new TextBox
             {
+                MaxLength = 1000,
                 Width = 380,
                 Height = 90,
                 Multiline = true,

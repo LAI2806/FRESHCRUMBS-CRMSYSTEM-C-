@@ -6,6 +6,12 @@ namespace freshcrumbs.CRM.winforms.Services
     {
         public static string GetFriendlyMessage(Exception ex)
         {
+            // Messages written by the API for the user (validation, access, branch rules) are shown as they are.
+            if (ex is ApiValidationException or ApiAccessDeniedException)
+            {
+                return ex.Message;
+            }
+
             if (ex is HttpRequestException httpEx)
             {
                 if (httpEx.StatusCode == System.Net.HttpStatusCode.NotFound)
@@ -30,7 +36,7 @@ namespace freshcrumbs.CRM.winforms.Services
 
                 if (httpEx.StatusCode == System.Net.HttpStatusCode.Forbidden)
                 {
-                    return "Access was denied. Your subscription may be inactive or may not include this feature, or new Terms & Conditions may need to be accepted. Please log out and log in again, or contact your administrator.";
+                    return "Access was denied. Your role may not allow this action, your subscription may be inactive or may not include this feature, or new Terms & Conditions may need to be accepted. Please log out and log in again, or contact your administrator.";
                 }
 
                 if (httpEx.StatusCode == System.Net.HttpStatusCode.InternalServerError)

@@ -135,6 +135,31 @@ namespace freshcrumbs.CRM.winforms.Forms
 
                 AuthSession.Start(login);
 
+                // First sign-in with the temporary password the ADMIN received: a new password is required.
+                if (login.MustChangePassword)
+                {
+                    using var passwordForm = new ChangePasswordForm(_passwordBox.Text);
+
+                    if (passwordForm.ShowDialog(this) != DialogResult.OK)
+                    {
+                        AuthSession.Clear();
+                        _statusLabel.Text = "You must set your own password before using FreshCrumbs.";
+                        return;
+                    }
+
+                    // The first session was limited to changing the password; sign in again with the new one.
+                    login = await _apiService.LoginAsync(_userNameBox.Text.Trim(), passwordForm.NewPassword);
+
+                    if (login.MustChangePassword || login.TenantId == null)
+                    {
+                        AuthSession.Clear();
+                        _statusLabel.Text = "Your password was changed. Please sign in again with the new password.";
+                        return;
+                    }
+
+                    AuthSession.Start(login);
+                }
+
                 List<string>? features = null;
 
                 if (!login.IsSuperAdmin)
@@ -150,6 +175,7 @@ namespace freshcrumbs.CRM.winforms.Forms
                     }
 
                     features = subscription.Features;
+                    AuthSession.SetAccess(subscription.Features, subscription.Permissions);
 
                     // The latest Terms & Conditions must be accepted before the company can use the CRM.
                     var terms = await new ApiService().GetTenantTermsAsync(login.TenantId!.Value);
@@ -223,7 +249,24 @@ namespace freshcrumbs.CRM.winforms.Forms
             };
 
             var mainForm = new MainCrmForm(company);
-            mainForm.FormClosed += (s, args) => Close();
+
+            // Same as the Super Admin console: Log Out returns to this screen; closing the window exits.
+            mainForm.FormClosed += (s, args) =>
+            {
+                if (mainForm.LogoutRequested)
+                {
+                    AuthSession.Clear();
+                    _userNameBox.Clear();
+                    _statusLabel.Text = "";
+                    Show();
+                    _userNameBox.Focus();
+                }
+                else
+                {
+                    Close();
+                }
+            };
+
             mainForm.Show();
             Hide();
         }

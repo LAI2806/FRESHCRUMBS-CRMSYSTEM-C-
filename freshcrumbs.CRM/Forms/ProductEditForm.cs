@@ -103,8 +103,10 @@ namespace freshcrumbs.CRM.winforms.Forms
             root.Controls.Add(titleLabel);
 
             _codeBox = AddField(root, "Product Code");
+            _codeBox.MaxLength = 50;
 
             _nameBox = AddField(root, "Product Name");
+            _nameBox.MaxLength = 200;
 
             var categoryLabel = new Label
             {
@@ -119,6 +121,7 @@ namespace freshcrumbs.CRM.winforms.Forms
 
             _categoryBox = new ComboBox
             {
+                MaxLength = 100,
                 Width = 380,
                 Height = 34,
                 Font = new Font("Segoe UI", 10f),
@@ -144,10 +147,14 @@ namespace freshcrumbs.CRM.winforms.Forms
             root.Controls.Add(_categoryBox);
 
             _descriptionBox = AddField(root, "Description", true);
+            _descriptionBox.MaxLength = 500;
 
             _priceBox = AddNumericField(root, "Price", 0, 999999, true);
 
-            _quantityBox = AddNumericField(root, "Stock", 0, 999999, false);
+            _quantityBox = AddNumericField(root, TenantCapabilities.HasBranching ? "Total Stock (managed per branch)" : "Stock", 0, 999999, false);
+
+            // Branching plans: the company total follows branch Stock In / Stock Out, so it is read-only here.
+            _quantityBox.Enabled = !TenantCapabilities.HasBranching;
 
             _reorderBox = AddNumericField(root, "Reorder", 0, 999999, false);
             _reorderBox.Value = 10;

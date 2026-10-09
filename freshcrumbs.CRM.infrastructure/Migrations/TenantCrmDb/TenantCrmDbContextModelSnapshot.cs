@@ -22,6 +22,134 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
 
             SqlServerModelBuilderExtensions.UseIdentityColumns(modelBuilder);
 
+            modelBuilder.Entity("freshcrumbs.CRM.domain.entities.Branch", b =>
+                {
+                    b.Property<int>("BranchId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("BranchId"));
+
+                    b.Property<string>("Address")
+                        .IsRequired()
+                        .HasMaxLength(300)
+                        .HasColumnType("nvarchar(300)");
+
+                    b.Property<string>("BranchName")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<Guid>("RowGuid")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier")
+                        .HasDefaultValueSql("NEWID()");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetime2")
+                        .HasDefaultValueSql("GETUTCDATE()");
+
+                    b.HasKey("BranchId");
+
+                    b.HasIndex("RowGuid")
+                        .IsUnique();
+
+                    b.ToTable("Branches");
+                });
+
+            modelBuilder.Entity("freshcrumbs.CRM.domain.entities.BranchAssignment", b =>
+                {
+                    b.Property<int>("BranchAssignmentId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("BranchAssignmentId"));
+
+                    b.Property<int?>("BranchId")
+                        .HasColumnType("int");
+
+                    b.Property<Guid>("RowGuid")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier")
+                        .HasDefaultValueSql("NEWID()");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetime2")
+                        .HasDefaultValueSql("GETUTCDATE()");
+
+                    b.Property<string>("UserId")
+                        .IsRequired()
+                        .HasMaxLength(450)
+                        .HasColumnType("nvarchar(450)");
+
+                    b.Property<string>("UserName")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.HasKey("BranchAssignmentId");
+
+                    b.HasIndex("BranchId");
+
+                    b.HasIndex("RowGuid")
+                        .IsUnique();
+
+                    b.HasIndex("UserId")
+                        .IsUnique();
+
+                    b.ToTable("BranchAssignments");
+                });
+
+            modelBuilder.Entity("freshcrumbs.CRM.domain.entities.BranchInventory", b =>
+                {
+                    b.Property<int>("BranchInventoryId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("BranchInventoryId"));
+
+                    b.Property<int>("BranchId")
+                        .HasColumnType("int");
+
+                    b.Property<int>("ProductId")
+                        .HasColumnType("int");
+
+                    b.Property<int>("Quantity")
+                        .HasColumnType("int");
+
+                    b.Property<Guid>("RowGuid")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier")
+                        .HasDefaultValueSql("NEWID()");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetime2")
+                        .HasDefaultValueSql("GETUTCDATE()");
+
+                    b.HasKey("BranchInventoryId");
+
+                    b.HasIndex("ProductId");
+
+                    b.HasIndex("RowGuid")
+                        .IsUnique();
+
+                    b.HasIndex("BranchId", "ProductId")
+                        .IsUnique();
+
+                    b.ToTable("BranchInventories");
+                });
+
             modelBuilder.Entity("freshcrumbs.CRM.domain.entities.Customer", b =>
                 {
                     b.Property<int>("CustomerId")
@@ -34,6 +162,9 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
                         .IsRequired()
                         .HasMaxLength(300)
                         .HasColumnType("nvarchar(300)");
+
+                    b.Property<int?>("BranchId")
+                        .HasColumnType("int");
 
                     b.Property<string>("ContactNo")
                         .IsRequired()
@@ -66,14 +197,29 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
                     b.Property<int>("LoyaltyPoints")
                         .HasColumnType("int");
 
+                    b.Property<Guid>("RowGuid")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier")
+                        .HasDefaultValueSql("NEWID()");
+
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasMaxLength(20)
                         .HasColumnType("nvarchar(20)");
 
+                    b.Property<DateTime>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetime2")
+                        .HasDefaultValueSql("GETUTCDATE()");
+
                     b.HasKey("CustomerId");
 
+                    b.HasIndex("BranchId");
+
                     b.HasIndex("CustomerCode")
+                        .IsUnique();
+
+                    b.HasIndex("RowGuid")
                         .IsUnique();
 
                     b.ToTable("Customers");
@@ -100,12 +246,25 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
                         .HasMaxLength(50)
                         .HasColumnType("nvarchar(50)");
 
+                    b.Property<Guid>("RowGuid")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier")
+                        .HasDefaultValueSql("NEWID()");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetime2")
+                        .HasDefaultValueSql("GETUTCDATE()");
+
                     b.Property<string>("VerificationStatus")
                         .IsRequired()
                         .HasMaxLength(30)
                         .HasColumnType("nvarchar(30)");
 
                     b.HasKey("EligibilityId");
+
+                    b.HasIndex("RowGuid")
+                        .IsUnique();
 
                     b.HasIndex("CustomerId", "Category")
                         .IsUnique();
@@ -120,6 +279,9 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
                         .HasColumnType("int");
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("FeedbackId"));
+
+                    b.Property<int?>("BranchId")
+                        .HasColumnType("int");
 
                     b.Property<string>("Category")
                         .IsRequired()
@@ -142,6 +304,11 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
                         .HasColumnType("bit")
                         .HasDefaultValue(false);
 
+                    b.Property<Guid>("RowGuid")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier")
+                        .HasDefaultValueSql("NEWID()");
+
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasMaxLength(20)
@@ -152,9 +319,19 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
                         .HasMaxLength(50)
                         .HasColumnType("nvarchar(50)");
 
+                    b.Property<DateTime>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetime2")
+                        .HasDefaultValueSql("GETUTCDATE()");
+
                     b.HasKey("FeedbackId");
 
+                    b.HasIndex("BranchId");
+
                     b.HasIndex("CustomerId");
+
+                    b.HasIndex("RowGuid")
+                        .IsUnique();
 
                     b.ToTable("Feedbacks");
                 });
@@ -166,6 +343,9 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
                         .HasColumnType("int");
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("InquiryId"));
+
+                    b.Property<int?>("BranchId")
+                        .HasColumnType("int");
 
                     b.Property<int>("CustomerId")
                         .HasColumnType("int");
@@ -196,6 +376,11 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
                         .HasMaxLength(1000)
                         .HasColumnType("nvarchar(1000)");
 
+                    b.Property<Guid>("RowGuid")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier")
+                        .HasDefaultValueSql("NEWID()");
+
                     b.Property<string>("Source")
                         .IsRequired()
                         .HasMaxLength(50)
@@ -216,9 +401,19 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
                         .HasMaxLength(50)
                         .HasColumnType("nvarchar(50)");
 
+                    b.Property<DateTime>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetime2")
+                        .HasDefaultValueSql("GETUTCDATE()");
+
                     b.HasKey("InquiryId");
 
+                    b.HasIndex("BranchId");
+
                     b.HasIndex("CustomerId");
+
+                    b.HasIndex("RowGuid")
+                        .IsUnique();
 
                     b.ToTable("Inquiries");
                 });
@@ -248,6 +443,11 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
                     b.Property<int>("PointsUsed")
                         .HasColumnType("int");
 
+                    b.Property<Guid>("RowGuid")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier")
+                        .HasDefaultValueSql("NEWID()");
+
                     b.Property<int?>("SalesTransactionId")
                         .HasColumnType("int");
 
@@ -256,9 +456,17 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
                         .HasMaxLength(50)
                         .HasColumnType("nvarchar(50)");
 
+                    b.Property<DateTime>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetime2")
+                        .HasDefaultValueSql("GETUTCDATE()");
+
                     b.HasKey("LoyaltyTransactionId");
 
                     b.HasIndex("CustomerId");
+
+                    b.HasIndex("RowGuid")
+                        .IsUnique();
 
                     b.HasIndex("SalesTransactionId");
 
@@ -308,14 +516,27 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
                         .HasColumnType("int")
                         .HasDefaultValue(10);
 
+                    b.Property<Guid>("RowGuid")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier")
+                        .HasDefaultValueSql("NEWID()");
+
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasMaxLength(20)
                         .HasColumnType("nvarchar(20)");
 
+                    b.Property<DateTime>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetime2")
+                        .HasDefaultValueSql("GETUTCDATE()");
+
                     b.HasKey("ProductId");
 
                     b.HasIndex("ProductCode")
+                        .IsUnique();
+
+                    b.HasIndex("RowGuid")
                         .IsUnique();
 
                     b.ToTable("Products");
@@ -328,6 +549,9 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
                         .HasColumnType("int");
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("PromotionId"));
+
+                    b.Property<int?>("BranchId")
+                        .HasColumnType("int");
 
                     b.Property<string>("Description")
                         .IsRequired()
@@ -364,6 +588,11 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
                         .HasColumnType("int")
                         .HasDefaultValue(0);
 
+                    b.Property<Guid>("RowGuid")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier")
+                        .HasDefaultValueSql("NEWID()");
+
                     b.Property<DateTime>("StartDate")
                         .HasColumnType("datetime2");
 
@@ -372,7 +601,17 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
                         .HasMaxLength(20)
                         .HasColumnType("nvarchar(20)");
 
+                    b.Property<DateTime>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetime2")
+                        .HasDefaultValueSql("GETUTCDATE()");
+
                     b.HasKey("PromotionId");
+
+                    b.HasIndex("BranchId");
+
+                    b.HasIndex("RowGuid")
+                        .IsUnique();
 
                     b.ToTable("Promotions");
                 });
@@ -384,6 +623,9 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
                         .HasColumnType("int");
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("TransactionId"));
+
+                    b.Property<int?>("BranchId")
+                        .HasColumnType("int");
 
                     b.Property<decimal>("CustomerDiscountAmount")
                         .HasPrecision(18, 2)
@@ -419,6 +661,11 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
                     b.Property<int?>("PromotionId")
                         .HasColumnType("int");
 
+                    b.Property<Guid>("RowGuid")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier")
+                        .HasDefaultValueSql("NEWID()");
+
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasMaxLength(20)
@@ -431,13 +678,133 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
                     b.Property<DateTime>("TransactionDate")
                         .HasColumnType("datetime2");
 
+                    b.Property<DateTime>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetime2")
+                        .HasDefaultValueSql("GETUTCDATE()");
+
                     b.HasKey("TransactionId");
+
+                    b.HasIndex("BranchId");
 
                     b.HasIndex("CustomerId");
 
                     b.HasIndex("PromotionId");
 
+                    b.HasIndex("RowGuid")
+                        .IsUnique();
+
                     b.ToTable("SalesTransactions");
+                });
+
+            modelBuilder.Entity("freshcrumbs.CRM.domain.entities.SyncOutboxEntry", b =>
+                {
+                    b.Property<long>("Sequence")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<long>("Sequence"));
+
+                    b.Property<int>("Attempts")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime>("ChangedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<Guid>("EntityRowGuid")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("EntityType")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
+
+                    b.Property<Guid>("GroupId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(1000)
+                        .HasColumnType("nvarchar(1000)");
+
+                    b.Property<string>("Operation")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<Guid>("OperationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Payload")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<DateTime?>("SyncedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.HasKey("Sequence");
+
+                    b.HasIndex("EntityRowGuid");
+
+                    b.HasIndex("OperationId")
+                        .IsUnique();
+
+                    b.HasIndex("Status", "Sequence");
+
+                    b.ToTable("SyncOutbox");
+                });
+
+            modelBuilder.Entity("freshcrumbs.CRM.domain.entities.SyncReceipt", b =>
+                {
+                    b.Property<Guid>("OperationId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Detail")
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
+
+                    b.Property<Guid>("EntityRowGuid")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("EntityType")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
+
+                    b.Property<DateTime>("ProcessedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Result")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.HasKey("OperationId");
+
+                    b.HasIndex("ProcessedAtUtc");
+
+                    b.ToTable("SyncReceipts");
+                });
+
+            modelBuilder.Entity("freshcrumbs.CRM.domain.entities.SyncState", b =>
+                {
+                    b.Property<string>("Key")
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<string>("Value")
+                        .IsRequired()
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
+
+                    b.HasKey("Key");
+
+                    b.ToTable("SyncStates");
                 });
 
             modelBuilder.Entity("freshcrumbs.CRM.domain.entities.TransactionItem", b =>
@@ -454,6 +821,11 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
                     b.Property<int>("Quantity")
                         .HasColumnType("int");
 
+                    b.Property<Guid>("RowGuid")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier")
+                        .HasDefaultValueSql("NEWID()");
+
                     b.Property<decimal>("Subtotal")
                         .HasPrecision(18, 2)
                         .HasColumnType("decimal(18,2)");
@@ -465,13 +837,58 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
                         .HasPrecision(18, 2)
                         .HasColumnType("decimal(18,2)");
 
+                    b.Property<DateTime>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetime2")
+                        .HasDefaultValueSql("GETUTCDATE()");
+
                     b.HasKey("TransactionItemId");
 
                     b.HasIndex("ProductId");
 
+                    b.HasIndex("RowGuid")
+                        .IsUnique();
+
                     b.HasIndex("TransactionId");
 
                     b.ToTable("TransactionItems");
+                });
+
+            modelBuilder.Entity("freshcrumbs.CRM.domain.entities.BranchAssignment", b =>
+                {
+                    b.HasOne("freshcrumbs.CRM.domain.entities.Branch", "Branch")
+                        .WithMany()
+                        .HasForeignKey("BranchId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.Navigation("Branch");
+                });
+
+            modelBuilder.Entity("freshcrumbs.CRM.domain.entities.BranchInventory", b =>
+                {
+                    b.HasOne("freshcrumbs.CRM.domain.entities.Branch", "Branch")
+                        .WithMany()
+                        .HasForeignKey("BranchId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("freshcrumbs.CRM.domain.entities.Product", "Product")
+                        .WithMany()
+                        .HasForeignKey("ProductId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Branch");
+
+                    b.Navigation("Product");
+                });
+
+            modelBuilder.Entity("freshcrumbs.CRM.domain.entities.Customer", b =>
+                {
+                    b.HasOne("freshcrumbs.CRM.domain.entities.Branch", null)
+                        .WithMany()
+                        .HasForeignKey("BranchId")
+                        .OnDelete(DeleteBehavior.Restrict);
                 });
 
             modelBuilder.Entity("freshcrumbs.CRM.domain.entities.CustomerDiscountEligibility", b =>
@@ -487,6 +904,11 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
 
             modelBuilder.Entity("freshcrumbs.CRM.domain.entities.Feedback", b =>
                 {
+                    b.HasOne("freshcrumbs.CRM.domain.entities.Branch", null)
+                        .WithMany()
+                        .HasForeignKey("BranchId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.HasOne("freshcrumbs.CRM.domain.entities.Customer", "Customer")
                         .WithMany()
                         .HasForeignKey("CustomerId")
@@ -498,6 +920,11 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
 
             modelBuilder.Entity("freshcrumbs.CRM.domain.entities.Inquiry", b =>
                 {
+                    b.HasOne("freshcrumbs.CRM.domain.entities.Branch", null)
+                        .WithMany()
+                        .HasForeignKey("BranchId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.HasOne("freshcrumbs.CRM.domain.entities.Customer", "Customer")
                         .WithMany()
                         .HasForeignKey("CustomerId")
@@ -525,8 +952,21 @@ namespace freshcrumbs.CRM.infrastructure.Migrations.TenantCrmDb
                     b.Navigation("SalesTransaction");
                 });
 
+            modelBuilder.Entity("freshcrumbs.CRM.domain.entities.Promotion", b =>
+                {
+                    b.HasOne("freshcrumbs.CRM.domain.entities.Branch", null)
+                        .WithMany()
+                        .HasForeignKey("BranchId")
+                        .OnDelete(DeleteBehavior.Restrict);
+                });
+
             modelBuilder.Entity("freshcrumbs.CRM.domain.entities.SalesTransaction", b =>
                 {
+                    b.HasOne("freshcrumbs.CRM.domain.entities.Branch", null)
+                        .WithMany()
+                        .HasForeignKey("BranchId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.HasOne("freshcrumbs.CRM.domain.entities.Customer", "Customer")
                         .WithMany()
                         .HasForeignKey("CustomerId")

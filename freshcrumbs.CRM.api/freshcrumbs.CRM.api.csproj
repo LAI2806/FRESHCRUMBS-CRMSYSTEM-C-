@@ -18,6 +18,11 @@
 	</ItemGroup>
 
 	<ItemGroup>
+		<!-- Desktop-only settings (Sync:Mode=Local). Must never reach the cloud host. -->
+		<Content Update="appsettings.Local.json" CopyToPublishDirectory="Never" />
+	</ItemGroup>
+
+	<ItemGroup>
 		<ProjectReference Include="..\freshcrumbs.CRM.domain\freshcrumbs.CRM.domain.csproj" />
 		<ProjectReference Include="..\freshcrumbs.CRM.infrastructure\freshcrumbs.CRM.infrastructure.csproj" />
 	</ItemGroup>

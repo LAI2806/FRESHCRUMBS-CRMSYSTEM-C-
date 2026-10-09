@@ -122,7 +122,7 @@ namespace freshcrumbs.CRM.winforms.Forms
             }
             catch (Exception ex)
             {
-                _statusLabel.Text = $"Failed to load items: {ex.Message}";
+                _statusLabel.Text = $"Failed to load items: {ErrorMessageHelper.GetFriendlyMessage(ex)}";
             }
         }
 

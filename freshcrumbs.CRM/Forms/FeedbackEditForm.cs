@@ -227,6 +227,7 @@ namespace freshcrumbs.CRM.winforms.Forms
 
             _commentBox = new TextBox
             {
+                MaxLength = 1000,
                 Width = 380,
                 Height = 80,
                 Font = new Font("Segoe UI", 10.5f),
@@ -266,7 +267,7 @@ namespace freshcrumbs.CRM.winforms.Forms
                 FlatStyle = FlatStyle.Flat,
                 Margin = new Padding(0, 0, 0, 14)
             };
-            _statusBox.Items.AddRange(new object[] { "Reviewed", "Resolved" });
+            _statusBox.Items.AddRange(new object[] { "Pending", "Reviewed", "Resolved" });
             _statusBox.SelectedIndex = 0;
 
             if (_isEditMode)
@@ -410,6 +411,12 @@ namespace freshcrumbs.CRM.winforms.Forms
             if (string.IsNullOrWhiteSpace(_commentBox.Text))
             {
                 _errorLabel.Text = "Comment is required.";
+                return;
+            }
+
+            if (_datePicker.Value.Date > DateTime.Today)
+            {
+                _errorLabel.Text = "The date cannot be in the future.";
                 return;
             }
 

@@ -13,5 +13,10 @@
         public string Response { get; set; } = string.Empty;
         public string RespondedBy { get; set; } = string.Empty;
         public DateTime? RespondedAt { get; set; }
+
+        // PREMIUM: branch where it was recorded (set by the server) and its name for display.
+        public int? BranchId { get; set; }
+
+        public string? BranchName { get; set; }
     }
 }

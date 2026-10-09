@@ -5,6 +5,7 @@
         public int ActiveCustomers { get; set; }
         public int ActiveProducts { get; set; }
         public decimal TodaysSales { get; set; }
+        public int TodaysTransactions { get; set; }
         public int LowStockCount { get; set; }
         public List<RecentSaleModel> RecentSales { get; set; } = new();
         public List<LowStockProductModel> LowStockProducts { get; set; } = new();
@@ -12,6 +13,15 @@
         public int NewCustomersThisMonth { get; set; }
         public int ActiveCustomersThisMonth { get; set; }
         public int LoyaltyActivityThisMonth { get; set; }
+        public CompanySummaryModel? Company { get; set; }
+    }
+
+    public class CompanySummaryModel
+    {
+        public decimal DiscountsGivenThisMonth { get; set; }
+        public int CancelledTransactionsThisMonth { get; set; }
+        public decimal InventoryValue { get; set; }
+        public int OutstandingLoyaltyPoints { get; set; }
     }
 
     public class RecentSaleModel

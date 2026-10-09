@@ -25,6 +25,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
         private Button _itemsButton = null!;
 
         private Button _deleteButton = null!;
+        private ComboBox? _branchFilter;
         private Label _statusLabel = null!;
         private Panel _pagerPanel = null!;
         private Label _pageInfoLabel = null!;
@@ -35,6 +36,8 @@ namespace freshcrumbs.CRM.winforms.UserControls
         private List<CustomerModel> _customers = new();
         private List<PromotionModel> _promotions = new();
         private List<ProductModel> _products = new();
+        private List<BranchModel> _branches = new();
+        private BranchModel? _myBranch;
         private List<SalesDisplayRow> _filteredTransactions = new();
         private int _currentPage = 1;
 
@@ -88,6 +91,21 @@ namespace freshcrumbs.CRM.winforms.UserControls
             _searchBox.TextChanged += SearchBox_TextChanged;
             toolbarPanel.Controls.Add(_searchBox);
 
+            // PREMIUM ADMIN only: filter by branch. MANAGER / STAFF already receive only their branch from the API.
+            if (TenantCapabilities.CanFilterByBranch)
+            {
+                _branchFilter = new ComboBox
+                {
+                    Location = new Point(290, 10),
+                    Width = 200,
+                    Font = new Font("Segoe UI", 10),
+                    DropDownStyle = ComboBoxStyle.DropDownList,
+                    FlatStyle = FlatStyle.Flat
+                };
+                _branchFilter.SelectedIndexChanged += (s, e) => ApplyFilters();
+                toolbarPanel.Controls.Add(_branchFilter);
+            }
+
             _addButton = CreateActionButton("+  Add Sale", AccentColor, Color.White, 130);
             _addButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             _addButton.Click += AddButton_Click;
@@ -116,6 +134,12 @@ namespace freshcrumbs.CRM.winforms.UserControls
             _deleteButton.Enabled = false;
             _deleteButton.Click += DeleteButton_Click;
             toolbarPanel.Controls.Add(_deleteButton);
+
+            // STAFF records sales only; editing, item corrections, cancelling and deleting are management actions.
+            bool manage = TenantCapabilities.CanManageSales;
+            _editButton.Visible = manage;
+            _itemsButton.Visible = manage;
+            _deleteButton.Visible = manage;
 
             toolbarPanel.Resize += (s, e) => PositionToolbarButtons(toolbarPanel);
 
@@ -319,21 +343,33 @@ namespace freshcrumbs.CRM.winforms.UserControls
                 _statusLabel.Text = "";
                 // Include inactive customers so older transactions still show their Customer Code and name.
                 _customers = await _apiService.GetCustomersAsync(_companyId, includeInactive: true);
-                try
+                _promotions = new List<PromotionModel>();
+                if (TenantCapabilities.CanUsePromotions)
                 {
-                    _promotions = await _apiService.GetPromotionsAsync(_companyId);
-                }
-                catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.Forbidden)
-                {
-                    _promotions = new List<PromotionModel>();
+                    try
+                    {
+                        _promotions = await _apiService.GetPromotionsAsync(_companyId);
+                    }
+                    catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.Forbidden)
+                    {
+                        _promotions = new List<PromotionModel>();
+                    }
                 }
                 _products = await _apiService.GetProductsAsync(_companyId);
+
+                if (TenantCapabilities.HasBranching)
+                {
+                    _branches = await _apiService.GetBranchesAsync(_companyId);
+                    _myBranch = await _apiService.GetMyBranchAsync(_companyId);
+                    PopulateBranchFilter();
+                }
+
                 _transactions = await _apiService.GetSalesTransactionsAsync(_companyId);
                 ApplyFilters();
             }
             catch (Exception ex)
             {
-                _statusLabel.Text = $"Failed to load sales data: {ex.Message}";
+                _statusLabel.Text = $"Failed to load sales data: {ErrorMessageHelper.GetFriendlyMessage(ex)}";
             }
         }
 
@@ -343,6 +379,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
             public string CustomerCode { get; set; } = string.Empty;
             public string CustomerName { get; set; } = string.Empty;
             public string PromotionName { get; set; } = string.Empty;
+            public string BranchName { get; set; } = string.Empty;
             public DateTime TransactionDate { get; set; }
             public decimal TotalAmount { get; set; }
             public decimal DiscountAmount { get; set; }
@@ -357,12 +394,16 @@ namespace freshcrumbs.CRM.winforms.UserControls
             string term = _searchBox?.Text.Trim().ToLowerInvariant() ?? "";
 
             _filteredTransactions = _transactions
+                .Where(t => MatchesBranchFilter(t.BranchId))
                 .Select(t => new SalesDisplayRow
                 {
                     TransactionId = t.TransactionId,
                     CustomerCode = GetCustomerCode(t.CustomerId),
                     CustomerName = GetCustomerName(t.CustomerId),
                     PromotionName = t.PromotionId.HasValue ? GetPromotionName(t.PromotionId.Value) : "None",
+                    BranchName = t.BranchId.HasValue
+                        ? _branches.FirstOrDefault(b => b.BranchId == t.BranchId.Value)?.BranchName ?? string.Empty
+                        : string.Empty,
                     TransactionDate = t.TransactionDate,
                     TotalAmount = t.TotalAmount,
                     DiscountAmount = t.DiscountAmount,
@@ -386,6 +427,40 @@ namespace freshcrumbs.CRM.winforms.UserControls
             RenderCurrentPage();
         }
 
+        private const int AllBranches = -1;
+        private const int NoBranch = 0;
+
+        private void PopulateBranchFilter()
+        {
+            if (_branchFilter == null)
+            {
+                return;
+            }
+
+            int selected = (_branchFilter.SelectedItem as BranchModel)?.BranchId ?? AllBranches;
+
+            _branchFilter.Items.Clear();
+            _branchFilter.Items.Add(new BranchModel { BranchId = AllBranches, BranchName = "All Branches" });
+
+            foreach (var branch in _branches.Where(b => string.Equals(b.Status, "Active", StringComparison.OrdinalIgnoreCase)))
+            {
+                _branchFilter.Items.Add(branch);
+            }
+
+            _branchFilter.Items.Add(new BranchModel { BranchId = NoBranch, BranchName = "No branch (before branching)" });
+
+            _branchFilter.SelectedItem = _branchFilter.Items.OfType<BranchModel>().FirstOrDefault(b => b.BranchId == selected)
+                ?? _branchFilter.Items[0];
+        }
+
+        private bool MatchesBranchFilter(int? branchId)
+        {
+            int selected = (_branchFilter?.SelectedItem as BranchModel)?.BranchId ?? AllBranches;
+
+            return selected == AllBranches
+                || (selected == NoBranch ? branchId == null : branchId == selected);
+        }
+
         private void BindGrid(List<SalesDisplayRow> displayRows)
         {
             _salesGrid.AutoGenerateColumns = true;
@@ -395,6 +470,17 @@ namespace freshcrumbs.CRM.winforms.UserControls
             if (_salesGrid.Columns["TransactionId"] != null)
             {
                 _salesGrid.Columns["TransactionId"].Visible = false;
+            }
+
+            if (!TenantCapabilities.CanUsePromotions)
+            {
+                foreach (var columnName in new[] { "PromotionName", "DiscountAmount" })
+                {
+                    if (_salesGrid.Columns[columnName] != null)
+                    {
+                        _salesGrid.Columns[columnName].Visible = false;
+                    }
+                }
             }
 
             SetColumnHeader("CustomerCode", "Customer Code");
@@ -407,6 +493,12 @@ namespace freshcrumbs.CRM.winforms.UserControls
             SetColumnHeader("FinalAmount", "Final Amount");
             SetColumnHeader("PaymentMethod", "Payment");
             SetColumnHeader("Status", "Status");
+            SetColumnHeader("BranchName", "Branch");
+
+            if (_salesGrid.Columns["BranchName"] != null)
+            {
+                _salesGrid.Columns["BranchName"].Visible = TenantCapabilities.HasBranching;
+            }
 
             if (_salesGrid.Columns["TransactionDate"] != null)
             {
@@ -468,7 +560,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
 
         private async void AddButton_Click(object? sender, EventArgs e)
         {
-            using var form = new SalesEditForm(null, _customers, _promotions, _products);
+            using var form = new SalesEditForm(null, _customers, _promotions, _products, _branches, _myBranch, _companyId);
             if (form.ShowDialog(this) != DialogResult.OK)
             {
                 return;
@@ -476,22 +568,15 @@ namespace freshcrumbs.CRM.winforms.UserControls
 
             try
             {
-                var created = await _apiService.CreateSalesTransactionAsync(_companyId, form.Result);
-
-                if (created != null)
-                {
-                    foreach (var item in form.ResultItems)
-                    {
-                        await _apiService.CreateTransactionItemAsync(_companyId, created.TransactionId, item);
-                    }
-                }
+                // The sale and its items in one request (no half-saved sale if an item fails).
+                await _apiService.CreateSalesTransactionAsync(_companyId, form.Result, form.ResultItems);
 
                 await LoadDataAsync();
                 _statusLabel.Text = "";
             }
             catch (Exception ex)
             {
-                _statusLabel.Text = $"Failed to create transaction: {ex.Message}";
+                _statusLabel.Text = $"Failed to create transaction: {ErrorMessageHelper.GetFriendlyMessage(ex)}";
             }
         }
 
@@ -517,7 +602,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
             }
             catch (Exception ex)
             {
-                _statusLabel.Text = $"Failed to update transaction: {ex.Message}";
+                _statusLabel.Text = $"Failed to update transaction: {ErrorMessageHelper.GetFriendlyMessage(ex)}";
             }
         }
 
@@ -570,7 +655,7 @@ namespace freshcrumbs.CRM.winforms.UserControls
             }
             catch (Exception ex)
             {
-                _statusLabel.Text = $"Failed to delete transaction: {ex.Message}";
+                _statusLabel.Text = $"Failed to delete transaction: {ErrorMessageHelper.GetFriendlyMessage(ex)}";
             }
         }
 

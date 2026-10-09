@@ -9,6 +9,9 @@ namespace freshcrumbs.CRM.api.Services
         public bool Succeeded => Error == null;
     }
 
+    // Result of validating a tenant account; Role is the stored ApplicationUser.Role (not yet normalized).
+    public record TenantUserCheck(string? Error, string? Role);
+
     public class EntitlementResult
     {
         public bool Allowed { get; set; }
@@ -28,6 +31,7 @@ namespace freshcrumbs.CRM.api.Services
         Task<EntitlementResult> CheckAccessAsync(int companyId, string? requiredFeature);
         Task<int> CountActiveUsersAsync(int companyId);
         Task<string?> CheckUserAsync(string? userId, int companyId);
+        Task<TenantUserCheck> CheckTenantUserAsync(string? userId, int companyId);
         Task<string?> CheckCanActivateUserAsync(int companyId);
         Task<SubscriptionResult> ChangePlanAsync(int companyId, int planId, DateTime effectiveDate, string? reason, string changedBy);
         Task<SubscriptionResult> RenewAsync(int companyId, string? reason, string changedBy);
@@ -83,22 +87,29 @@ namespace freshcrumbs.CRM.api.Services
         // The token proves who the caller was at login; this confirms the account is still valid for this company.
         public async Task<string?> CheckUserAsync(string? userId, int companyId)
         {
+            return (await CheckTenantUserAsync(userId, companyId)).Error;
+        }
+
+        // Same check as CheckUserAsync, but also returns the role stored on the account so the API
+        // authorizes against the current database value instead of anything the client sends.
+        public async Task<TenantUserCheck> CheckTenantUserAsync(string? userId, int companyId)
+        {
             var user = await _db.Users.AsNoTracking()
                 .Where(u => u.Id == userId)
-                .Select(u => new { u.TenantId, u.Status })
+                .Select(u => new { u.TenantId, u.Status, u.Role })
                 .FirstOrDefaultAsync();
 
             if (user == null || user.TenantId != companyId)
             {
-                return "This account does not belong to this company.";
+                return new TenantUserCheck("This account does not belong to this company.", null);
             }
 
             if (!string.Equals(user.Status, ActiveUserStatus, StringComparison.OrdinalIgnoreCase))
             {
-                return "This account is inactive. Please contact your administrator.";
+                return new TenantUserCheck("This account is inactive. Please contact your administrator.", null);
             }
 
-            return null;
+            return new TenantUserCheck(null, user.Role);
         }
 
         public async Task<EntitlementResult> CheckAccessAsync(int companyId, string? requiredFeature)

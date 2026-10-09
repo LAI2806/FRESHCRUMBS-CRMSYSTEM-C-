@@ -130,6 +130,14 @@ namespace freshcrumbs.CRM.api.Controllers
             {
                 return BadRequest($"TenantId {request.TenantId} does not match any existing company.");
             }
+
+            var role = TenantRoles.Normalize(request.Role);
+
+            if (role == null)
+            {
+                return BadRequest(new { message = $"Role must be one of: {string.Join(", ", TenantRoles.All)}." });
+            }
+
             var seatError = await _subscriptions.CheckCanActivateUserAsync(request.TenantId);
 
             if (seatError != null)
@@ -144,7 +152,7 @@ namespace freshcrumbs.CRM.api.Controllers
                 FirstName = request.FirstName,
                 LastName = request.LastName,
                 ContactNumber = request.ContactNumber,
-                Role = request.Role,
+                Role = role,
                 Status = "Active"
             };
 
@@ -167,6 +175,22 @@ namespace freshcrumbs.CRM.api.Controllers
             {
                 return NotFound($"User with id {id} not found.");
             }
+
+            // Tenant users are restricted to ADMIN / MANAGER / STAFF. Platform accounts (no tenant) keep their role untouched.
+            var role = user.Role;
+
+            if (user.TenantId != null)
+            {
+                var normalizedRole = TenantRoles.Normalize(request.Role);
+
+                if (normalizedRole == null)
+                {
+                    return BadRequest(new { message = $"Role must be one of: {string.Join(", ", TenantRoles.All)}." });
+                }
+
+                role = normalizedRole;
+            }
+
             var isReactivating = user.TenantId != null
                 && !string.Equals(user.Status, "Active", StringComparison.OrdinalIgnoreCase)
                 && string.Equals(request.Status, "Active", StringComparison.OrdinalIgnoreCase);
@@ -185,7 +209,7 @@ namespace freshcrumbs.CRM.api.Controllers
             user.LastName = request.LastName;
             user.ContactNumber = request.ContactNumber;
             user.Email = request.Email;
-            user.Role = request.Role;
+            user.Role = role;
             user.Status = request.Status;
 
             var result = await _userManager.UpdateAsync(user);

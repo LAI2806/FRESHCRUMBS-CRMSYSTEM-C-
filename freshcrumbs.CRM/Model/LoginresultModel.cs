@@ -18,10 +18,16 @@
 
         public bool IsSuperAdmin { get; set; }
 
+        // Tenant role (ADMIN / MANAGER / STAFF). Null for SuperAdmin, which is a platform role.
+        public string? Role { get; set; }
+
         public int? TenantId { get; set; }
 
         public string? CompanyCode { get; set; }
 
         public string? CompanyName { get; set; }
+
+        // The account still uses the temporary password its ADMIN received; a new one must be set first.
+        public bool MustChangePassword { get; set; }
     }
 }
